@@ -30,8 +30,7 @@ import feedparser
 # KONFIGURASI HALAMAN
 # ----------------------------------------------------------------------
 st.set_page_config(
-    page_title="Screener Saham IHSG — Multi-Parameter",
-    page_icon="📈",
+    page_title="Screener Saham IHSG Multi-Parameter",
     layout="wide",
 )
 
@@ -94,10 +93,7 @@ def fetch_all_idx_tickers():
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         html = urllib.request.urlopen(req).read().decode('utf-8')
         
-        # Hapus semua tag HTML untuk menyisakan teks murni
         text_only = re.sub(r'<[^>]+>', ' ', html)
-        
-        # Cari pola BEI: ABCD
         matches = re.findall(r'BEI\s*:\s*([A-Z]{4})', text_only)
         if matches:
             tickers = sorted(list(set([f"{m}.JK" for m in matches])))
@@ -108,18 +104,15 @@ def fetch_all_idx_tickers():
     
     return DEFAULT_UNIVERSE
 
-
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def fetch_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     try:
         df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True)
         if df is None or df.empty:
             return pd.DataFrame()
-        df = df.dropna()
-        return df
+        return df.dropna()
     except Exception:
         return pd.DataFrame()
-
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def fetch_fundamentals(ticker: str) -> dict:
@@ -136,7 +129,6 @@ def fetch_fundamentals(ticker: str) -> dict:
     except Exception:
         pass
     return out
-
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_news(query: str, max_items: int = 6):
@@ -171,7 +163,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["VolMA20"] = df["Volume"].rolling(20).mean()
     df["VolMA50"] = df["Volume"].rolling(50).mean()
 
-    # RSI 14
     delta = df["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -180,7 +171,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["RSI14"] = 100 - (100 / (1 + rs))
 
-    # MACD
     ema12 = df["Close"].ewm(span=12, adjust=False).mean()
     ema26 = df["Close"].ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
@@ -287,10 +277,10 @@ def build_dca_plan(df: pd.DataFrame) -> pd.DataFrame:
     invalidation = ma150 * 0.97
 
     return pd.DataFrame([
-        {"Tahap": "Entry 1 (awal)", "Alokasi": "30-40%", "Area Harga (acuan)": round(price, 0), "Basis": "Harga saat ini"},
-        {"Tahap": "Entry 2 (penambahan)", "Alokasi": "30-35%", "Area Harga (acuan)": round(ma20, 0), "Basis": "Pullback MA20"},
-        {"Tahap": "Entry 3 (cadangan)", "Alokasi": "20-30%", "Area Harga (acuan)": round(ma50, 0), "Basis": "Pullback MA50"},
-        {"Tahap": "Invalidation (batal)", "Alokasi": "-", "Area Harga (acuan)": round(invalidation, 0), "Basis": "Breakdown MA150"},
+        {"Tahap": "Entry 1 (Awal)", "Alokasi": "30-40%", "Area Harga (Acuan)": round(price, 0), "Basis": "Harga saat ini"},
+        {"Tahap": "Entry 2 (Penambahan)", "Alokasi": "30-35%", "Area Harga (Acuan)": round(ma20, 0), "Basis": "Pullback MA20"},
+        {"Tahap": "Entry 3 (Cadangan)", "Alokasi": "20-30%", "Area Harga (Acuan)": round(ma50, 0), "Basis": "Pullback MA50"},
+        {"Tahap": "Invalidation (Batal)", "Alokasi": "-", "Area Harga (Acuan)": round(invalidation, 0), "Basis": "Breakdown MA150"},
     ])
 
 # ----------------------------------------------------------------------
@@ -323,7 +313,9 @@ def analyze_ticker(ticker: str, benchmark_df: pd.DataFrame, weights: dict, secto
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def run_screening(tickers: tuple, weights: dict, sector_bias: dict, min_avg_value: float):
-    benchmark_df = add_indicators(fetch_history("^JKSE", period="1y", interval="1d"))
+    raw_benchmark = fetch_history("^JKSE", period="1y", interval="1d")
+    benchmark_df = add_indicators(raw_benchmark) if not raw_benchmark.empty else pd.DataFrame()
+    
     results = []
     with ThreadPoolExecutor(max_workers=8) as ex:
         futures = [ex.submit(analyze_ticker, t, benchmark_df, weights, sector_bias, min_avg_value) for t in tickers]
@@ -334,15 +326,14 @@ def run_screening(tickers: tuple, weights: dict, sector_bias: dict, min_avg_valu
 # ----------------------------------------------------------------------
 # UI — SIDEBAR
 # ----------------------------------------------------------------------
-st.sidebar.title("⚙️ Konfigurasi Screener")
+st.sidebar.title("Konfigurasi Screener")
 
-# Menggunakan daftar ticker komplit hasil scraping dinamis
 ALL_TICKERS = fetch_all_idx_tickers()
 
 st.sidebar.markdown("**Universe Saham (Komperehensif BEI)**")
 st.sidebar.caption(f"Telah mendeteksi {len(ALL_TICKERS)} kode saham. Biarkan seluruhnya untuk full scan, atau hapus sebagian untuk mempercepat kalkulasi.")
 universe_input = st.sidebar.text_area(
-    "Daftar ticker (format: KODE.JK)",
+    "Daftar Ticker (Format: KODE.JK)",
     value=", ".join(ALL_TICKERS),
     height=150,
 )
@@ -362,52 +353,52 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("**Bias Sektor (Konteks Makro)**")
 sector_bias = {}
 default_bias = {"Keuangan": 70, "Properti": 35, "Energi/Mineral": 55, "Infrastruktur/Telko": 55, "Industri": 55, "Consumer Primer": 55, "Consumer Non-Primer": 60, "Kesehatan": 50, "Lainnya": 50}
-with st.sidebar.expander("Atur bias per sektor"):
+with st.sidebar.expander("Atur Bias Per Sektor"):
     for sec in sorted(set(SECTOR_MAP.values()) | {"Lainnya"}):
         sector_bias[sec] = st.slider(sec, 0, 100, default_bias.get(sec, 50), key=f"bias_{sec}")
 
 st.sidebar.markdown("---")
-n_final = st.sidebar.slider("Jumlah saham terbaik ditampilkan", 3, 10, 5)
-min_avg_value = st.sidebar.number_input("Ambang rata-rata transaksi 20 hari (miliar Rp)", min_value=0.5, value=5.0, step=0.5) * 1e9
+n_final = st.sidebar.slider("Jumlah Saham Terbaik Ditampilkan", 3, 10, 5)
+min_avg_value = st.sidebar.number_input("Ambang Rata-Rata Transaksi 20 Hari (Miliar Rp)", min_value=0.5, value=5.0, step=0.5) * 1e9
 
-st.sidebar.warning("⚠️ **Catatan**: Memproses seluruh saham BEI (900+) secara bersamaan dapat memakan waktu 2-3 menit hingga selesai. Mohon tunggu prosesnya.")
-run_btn = st.sidebar.button("🔄 Jalankan Screening", type="primary", use_container_width=True)
+st.sidebar.caption("Catatan: Memproses seluruh saham BEI (900+) secara bersamaan dapat memakan waktu beberapa menit. Mohon tunggu prosesnya.")
+run_btn = st.sidebar.button("Jalankan Screening", type="primary", use_container_width=True)
 
 # ----------------------------------------------------------------------
 # UI — HEADER
 # ----------------------------------------------------------------------
-st.title("📈 Dashboard Screening Saham IHSG — Multi-Parameter")
-st.caption("Data harga: yfinance. Berita: Google News RSS. Menggunakan keseluruhan Emiten BEI terkini.")
+st.title("Dashboard Screening Saham IHSG Multi-Parameter")
+st.caption("Data harga: yfinance | Berita: Google News RSS | Cakupan: Keseluruhan Emiten BEI Terkini")
 
 if not run_btn and "screening_results" not in st.session_state:
-    st.info("Atur konfigurasi di sidebar, lalu klik **Jalankan Screening**.")
+    st.info("Atur konfigurasi di panel samping, lalu klik Jalankan Screening.")
     st.stop()
 
 # ----------------------------------------------------------------------
 # EKSEKUSI
 # ----------------------------------------------------------------------
 if run_btn:
-    with st.spinner(f"Memproses {len(tickers)} saham secara paralel... ini akan memakan waktu beberapa menit."):
+    with st.spinner(f"Memproses {len(tickers)} saham..."):
         results, benchmark_df = run_screening(tickers, weights, sector_bias, min_avg_value)
         st.session_state["screening_results"], st.session_state["benchmark_df"], st.session_state["last_run"] = results, benchmark_df, dt.datetime.now()
 
 results, benchmark_df, last_run = st.session_state.get("screening_results", []), st.session_state.get("benchmark_df", pd.DataFrame()), st.session_state.get("last_run")
 
 if not results:
-    st.error("Tidak ada data valid yang ditarik. Pastikan koneksi aman.")
+    st.error("Tidak ada data valid yang dapat ditarik. Pastikan koneksi aman.")
     st.stop()
 
-if last_run: st.caption(f"Terakhir diperbarui: {last_run.strftime('%d %b %Y, %H:%M:%S')}")
+if last_run: st.caption(f"Pembaruan Terakhir: {last_run.strftime('%d %b %Y, %H:%M:%S')}")
 
 # ----------------------------------------------------------------------
 # OUTPUT
 # ----------------------------------------------------------------------
 df_results = pd.DataFrame(results).drop(columns=["_df", "_fund", "_trend_checks"]).sort_values("Skor Total", ascending=False)
-st.subheader(f"📊 Hasil Screening — {len(df_results)} Saham Lolos Likuiditas Dasar")
+st.subheader(f"Hasil Screening: {len(df_results)} Saham Lolos Likuiditas")
 st.dataframe(df_results.style.background_gradient(subset=["Skor Total"], cmap="Greens"), use_container_width=True, hide_index=True)
 
 st.markdown("---")
-st.header(f"🏆 {n_final} Saham Terbaik")
+st.header(f"{n_final} Saham Terbaik")
 results_map = {r["Ticker"]: r for r in results}
 
 for _, row in df_results.head(n_final).iterrows():
@@ -419,7 +410,12 @@ for _, row in df_results.head(n_final).iterrows():
             st.metric("Skor Total", f"{row['Skor Total']:.1f} / 100")
             st.metric("Harga Terakhir", f"Rp {row['Harga']:,.0f}")
             with st.expander("Detail Trend Template"):
-                for k, v in r["_trend_checks"].items(): st.write(f"{'✅' if v else '❌'} {k}" if k != "note" else v)
+                for k, v in r["_trend_checks"].items():
+                    if k != "note":
+                        status = "[Terpenuhi]" if v else "[Gagal]"
+                        st.write(f"{status} {k}")
+                    else:
+                        st.write(v)
         with c2:
             fig = go.Figure()
             p_df = r["_df"].tail(180)
@@ -429,22 +425,24 @@ for _, row in df_results.head(n_final).iterrows():
             fig.update_layout(height=350, margin=dict(l=10, r=10, t=30, b=10), xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("**📐 Rencana DCA**")
+        st.markdown("**Rencana DCA**")
         st.dataframe(build_dca_plan(r["_df"]), hide_index=True, use_container_width=True)
         
-        st.markdown("**📰 Berita Terbaru**")
+        st.markdown("**Berita Terbaru**")
         for item in fetch_news(f"{row['Ticker']} saham", 3):
             st.markdown(f"- [{item['title']}]({item['link']}) <sub>{item['source']}</sub>", unsafe_allow_html=True)
 
 st.markdown("---")
-st.header("🌐 Konteks Makro — IHSG")
+st.header("Konteks Makro — IHSG")
 if not benchmark_df.empty:
     fig = go.Figure()
     p_df = benchmark_df.tail(180)
     fig.add_trace(go.Scatter(x=p_df.index, y=p_df["Close"], name="IHSG", line=dict(color="navy")))
     fig.update_layout(height=320, title="IHSG — 6 Bulan Terakhir")
     st.plotly_chart(fig, use_container_width=True)
+else:
+    st.caption("Data IHSG saat ini tidak dapat dimuat dari sumber.")
 
-st.markdown("**📰 Berita Makro Terbaru**")
+st.markdown("**Berita Makro Terbaru**")
 for item in fetch_news("IHSG BI Rate ekonomi Indonesia", 4):
     st.markdown(f"- [{item['title']}]({item['link']}) <sub>{item['source']}</sub>", unsafe_allow_html=True)
