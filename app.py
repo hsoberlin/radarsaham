@@ -2,8 +2,8 @@
 Dashboard Screening Saham IHSG Multi-Parameter Swing Trading
 ================================================================
 Mengambil data harga via yfinance dan berita via RSS.
-Dilengkapi modul penilaian komposit: Trend, Volume/Momentum, 
-Foreign Flow, Fundamental, dan Makro Sektor.
+Dilengkapi modul penilaian komposit: Trend, Momentum, 
+Akumulasi Broker (Order Flow), Fundamental, dan Makro Sektor.
 """
 
 import time
@@ -20,6 +20,7 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 import feedparser
+import requests
 
 # ----------------------------------------------------------------------
 # KONFIGURASI HALAMAN
@@ -73,7 +74,7 @@ DEFAULT_WEIGHTS = {
     "likuiditas": 0.15,
     "teknikal": 0.25,
     "momentum": 0.30,
-    "foreign_flow": 0.20,
+    "broker_flow": 0.20,
     "fundamental": 0.05,
     "katalis": 0.05,
 }
@@ -121,6 +122,35 @@ def fetch_fundamentals(ticker: str) -> dict:
     except Exception:
         pass
     return out
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def fetch_broker_summary(ticker: str):
+    """
+    Penarikan data Broker Summary secara daring.
+    Target: 3 bulan terakhir.
+    """
+    kode_murni = ticker.replace(".JK", "")
+    
+    # ---------------------------------------------------------
+    # TEMPELKAN TAUTAN SUMBER DATA ANDA DI BAWAH INI
+    # Contoh: url = f"https://api.domain.com/broker?code={kode_murni}&period=3m"
+    # ---------------------------------------------------------
+    url = "" 
+    
+    if not url:
+        return None
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+    except Exception:
+        pass
+    return None
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_news(query: str, max_items: int = 6):
@@ -222,21 +252,37 @@ def score_momentum(df: pd.DataFrame, benchmark_df: pd.DataFrame) -> float:
 
     return float(np.clip(sub, 0, 100))
 
-def score_foreign_flow(ticker: str) -> float:
+def score_broker_accumulation(ticker: str) -> float:
     """
-    Koneksikan fungsi ini ke sumber data CSV atau API Anda.
-    Evaluasi Net Foreign Buy/Sell harian untuk menghasilkan skor akumulasi 0-100.
+    Evaluasi Net Buy / Net Sell broker berdasarkan data 3 bulan terakhir.
     """
-    # Contoh implementasi mandiri (Uncomment dan sesuaikan):
-    # try:
-    #     df_foreign = pd.read_csv("data_asing_harian.csv")
-    #     data_emiten = df_foreign[df_foreign['Ticker'] == ticker]
-    #     akumulasi_bersih = data_emiten['Net_Foreign_Buy'].sum()
-    #     if akumulasi_bersih > 0: return 80.0
-    #     elif akumulasi_bersih < 0: return 20.0
-    # except Exception:
-    #     pass
+    data = fetch_broker_summary(ticker)
     
+    # Jika URL kosong atau data gagal ditarik, berikan nilai netral
+    if not data:
+        return 50.0
+        
+    # ---------------------------------------------------------
+    # SESUAIKAN LOGIKA DI BAWAH DENGAN STRUKTUR JSON DARI SUMBER ANDA
+    # Contoh sederhana: menghitung rasio top 3 broker pembeli vs penjual
+    # ---------------------------------------------------------
+    try:
+        # Asumsi JSON memiliki keys 'total_net_buy' dan 'total_net_sell'
+        net_buy = float(data.get("total_net_buy", 0))
+        net_sell = float(data.get("total_net_sell", 0))
+        
+        if net_buy > net_sell * 1.5:
+            return 90.0 # Akumulasi masif
+        elif net_buy > net_sell:
+            return 70.0 # Akumulasi moderat
+        elif net_sell > net_buy * 1.5:
+            return 20.0 # Distribusi masif
+        elif net_sell > net_buy:
+            return 40.0 # Distribusi moderat
+            
+    except Exception:
+        pass
+        
     return 50.0
 
 def score_fundamental(fund: dict) -> float:
@@ -282,18 +328,18 @@ def analyze_ticker(ticker: str, benchmark_df: pd.DataFrame, weights: dict, secto
     s_liq = score_liquidity(df, min_avg_value)
     s_trend, t_checks = score_trend_template(df)
     s_mom = score_momentum(df, benchmark_df)
-    s_foreign = score_foreign_flow(ticker)
+    s_broker = score_broker_accumulation(ticker)
     s_fund = score_fundamental(fund)
     s_cat = float(sector_bias.get(sector, 50))
 
-    scores_dict = {"likuiditas": s_liq, "teknikal": s_trend, "momentum": s_mom, "foreign_flow": s_foreign, "fundamental": s_fund, "katalis": s_cat}
+    scores_dict = {"likuiditas": s_liq, "teknikal": s_trend, "momentum": s_mom, "broker_flow": s_broker, "fundamental": s_fund, "katalis": s_cat}
     total = composite_score(scores_dict, weights)
     
     return {
         "Ticker": ticker.replace(".JK", ""), "Sektor": sector,
         "Harga": round(float(df.iloc[-1]["Close"]), 0), "Skor Total": round(total, 1),
         "Likuiditas": round(s_liq, 1), "Teknikal": round(s_trend, 1),
-        "Momentum": round(s_mom, 1), "Foreign Flow": round(s_foreign, 1),
+        "Momentum": round(s_mom, 1), "Order Flow": round(s_broker, 1),
         "Fundamental": round(s_fund, 1), "Katalis/Makro": round(s_cat, 1),
         "_df": df, "_fund": fund, "_trend_checks": t_checks,
     }
@@ -329,12 +375,12 @@ st.sidebar.markdown("**Bobot Analisis Khusus**")
 w_liq = st.sidebar.slider("Likuiditas & Struktur Pasar", 0, 100, int(DEFAULT_WEIGHTS["likuiditas"] * 100))
 w_tren = st.sidebar.slider("Struktur Tren Harga", 0, 100, int(DEFAULT_WEIGHTS["teknikal"] * 100))
 w_mom = st.sidebar.slider("Aktivitas Volume & Momentum", 0, 100, int(DEFAULT_WEIGHTS["momentum"] * 100))
-w_ff = st.sidebar.slider("Jejak Akumulasi Asing (Foreign Flow)", 0, 100, int(DEFAULT_WEIGHTS["foreign_flow"] * 100))
+w_brk = st.sidebar.slider("Akumulasi Broker / Order Flow", 0, 100, int(DEFAULT_WEIGHTS["broker_flow"] * 100))
 w_fund = st.sidebar.slider("Pertumbuhan Fundamental", 0, 100, int(DEFAULT_WEIGHTS["fundamental"] * 100))
 w_kat = st.sidebar.slider("Sentimen Makro Sektoral", 0, 100, int(DEFAULT_WEIGHTS["katalis"] * 100))
 
-w_sum = max(w_liq + w_tren + w_mom + w_ff + w_fund + w_kat, 1)
-weights = {"likuiditas": w_liq/w_sum, "teknikal": w_tren/w_sum, "momentum": w_mom/w_sum, "foreign_flow": w_ff/w_sum, "fundamental": w_fund/w_sum, "katalis": w_kat/w_sum}
+w_sum = max(w_liq + w_tren + w_mom + w_brk + w_fund + w_kat, 1)
+weights = {"likuiditas": w_liq/w_sum, "teknikal": w_tren/w_sum, "momentum": w_mom/w_sum, "broker_flow": w_brk/w_sum, "fundamental": w_fund/w_sum, "katalis": w_kat/w_sum}
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Rotasi Sektor Sentimen**")
