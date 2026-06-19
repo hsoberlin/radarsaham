@@ -4,6 +4,7 @@ Dashboard Screening Saham IHSG Multi-Parameter Swing Trading
 Mengambil data harga via yfinance dan berita via RSS.
 Dilengkapi modul penilaian komposit: Trend, Momentum, 
 Proksi Smart Money (VPA / CMF / OBV), Fundamental, dan Makro Sektor.
+Filter Likuiditas diubah menjadi Hard Filter absolut.
 """
 
 import time
@@ -310,6 +311,14 @@ def build_dca_plan(df: pd.DataFrame) -> pd.DataFrame:
 def analyze_ticker(ticker: str, benchmark_df: pd.DataFrame, weights: dict, sector_bias: dict, min_avg_value: float):
     df = fetch_history(ticker, period="1y", interval="1d")
     if df.empty or len(df) < 60: return None
+
+    # --- HARD FILTER LIKUIDITAS ---
+    # Jika rata-rata transaksi 20 hari di bawah input parameter, batalkan dan buang dari antrean
+    recent_20 = df.tail(20)
+    avg_tx_value = (recent_20["Close"] * recent_20["Volume"]).mean()
+    if avg_tx_value < min_avg_value:
+        return None
+    # ------------------------------
 
     df = add_indicators(df)
     fund = fetch_fundamentals(ticker)
