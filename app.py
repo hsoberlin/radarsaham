@@ -3,7 +3,7 @@ Dashboard Screening Saham IHSG Multi-Parameter Swing Trading
 ================================================================
 Mengambil data harga via yfinance dan berita via RSS.
 Dilengkapi modul penilaian komposit: Trend, Momentum, 
-Akumulasi Broker (Order Flow), Fundamental, dan Makro Sektor.
+Proksi Smart Money (VPA / CMF / OBV), Fundamental, dan Makro Sektor.
 """
 
 import time
@@ -20,7 +20,6 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 import feedparser
-import requests
 
 # ----------------------------------------------------------------------
 # KONFIGURASI HALAMAN
@@ -72,9 +71,9 @@ SECTOR_MAP = {
 
 DEFAULT_WEIGHTS = {
     "likuiditas": 0.15,
-    "teknikal": 0.25,
-    "momentum": 0.30,
-    "broker_flow": 0.20,
+    "teknikal": 0.20,
+    "momentum": 0.25,
+    "smart_money": 0.30,
     "fundamental": 0.05,
     "katalis": 0.05,
 }
@@ -124,35 +123,6 @@ def fetch_fundamentals(ticker: str) -> dict:
     return out
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
-def fetch_broker_summary(ticker: str):
-    """
-    Penarikan data Broker Summary secara daring.
-    Target: 3 bulan terakhir.
-    """
-    kode_murni = ticker.replace(".JK", "")
-    
-    # ---------------------------------------------------------
-    # TEMPELKAN TAUTAN SUMBER DATA ANDA DI BAWAH INI
-    # Contoh: url = f"https://api.domain.com/broker?code={kode_murni}&period=3m"
-    # ---------------------------------------------------------
-    url = "" 
-    
-    if not url:
-        return None
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-    except Exception:
-        pass
-    return None
-
-@st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_news(query: str, max_items: int = 6):
     encoded_query = urllib.parse.quote(query)
     url = f"https://news.google.com/rss/search?q={encoded_query}&hl=id&gl=ID&ceid=ID:id"
@@ -172,7 +142,7 @@ def fetch_news(query: str, max_items: int = 6):
         return []
 
 # ----------------------------------------------------------------------
-# INDIKATOR TEKNIKAL
+# INDIKATOR TEKNIKAL & SMART MONEY PROXY
 # ----------------------------------------------------------------------
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -182,11 +152,21 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["MA200"] = df["Close"].rolling(200).mean()
     df["VolMA20"] = df["Volume"].rolling(20).mean()
 
+    # RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     rs = gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan)
     df["RSI14"] = 100 - (100 / (1 + rs))
+
+    # OBV (On-Balance Volume)
+    df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
+    df['OBV_MA20'] = df['OBV'].rolling(20).mean()
+
+    # CMF (Chaikin Money Flow)
+    mfm = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low']).replace(0, 0.0001)
+    mfv = mfm * df['Volume']
+    df['CMF'] = mfv.rolling(20).sum() / df['Volume'].rolling(20).sum()
 
     df["High52w"] = df["Close"].rolling(252, min_periods=50).max()
     df["Low52w"] = df["Close"].rolling(252, min_periods=50).min()
@@ -252,38 +232,48 @@ def score_momentum(df: pd.DataFrame, benchmark_df: pd.DataFrame) -> float:
 
     return float(np.clip(sub, 0, 100))
 
-def score_broker_accumulation(ticker: str) -> float:
+def score_smart_money_proxy(df: pd.DataFrame) -> float:
     """
-    Evaluasi Net Buy / Net Sell broker berdasarkan data 3 bulan terakhir.
+    Evaluasi jejak akumulasi berdasarkan struktur harga dan volume (VPA, CMF, OBV).
     """
-    data = fetch_broker_summary(ticker)
-    
-    # Jika URL kosong atau data gagal ditarik, berikan nilai netral
-    if not data:
+    if df.empty or len(df) < 20: 
         return 50.0
         
-    # ---------------------------------------------------------
-    # SESUAIKAN LOGIKA DI BAWAH DENGAN STRUKTUR JSON DARI SUMBER ANDA
-    # Contoh sederhana: menghitung rasio top 3 broker pembeli vs penjual
-    # ---------------------------------------------------------
-    try:
-        # Asumsi JSON memiliki keys 'total_net_buy' dan 'total_net_sell'
-        net_buy = float(data.get("total_net_buy", 0))
-        net_sell = float(data.get("total_net_sell", 0))
+    last = df.iloc[-1]
+    recent = df.tail(20)
+    score = 50.0
+    
+    # 1. Chaikin Money Flow (CMF)
+    cmf_val = last.get('CMF', 0)
+    if not math.isnan(cmf_val):
+        cmf_score = np.clip((cmf_val + 0.2) * 250, 0, 100)
+        score += (cmf_score - 50) * 0.40
         
-        if net_buy > net_sell * 1.5:
-            return 90.0 # Akumulasi masif
-        elif net_buy > net_sell:
-            return 70.0 # Akumulasi moderat
-        elif net_sell > net_buy * 1.5:
-            return 20.0 # Distribusi masif
-        elif net_sell > net_buy:
-            return 40.0 # Distribusi moderat
+    # 2. On-Balance Volume (OBV) Trend
+    obv_val = last.get('OBV', 0)
+    obv_ma = last.get('OBV_MA20', 0)
+    if not math.isnan(obv_val) and not math.isnan(obv_ma) and obv_ma != 0:
+        obv_ratio = obv_val / obv_ma
+        if obv_ratio > 1.05: score += 15
+        elif obv_ratio > 1.0: score += 5
+        elif obv_ratio < 0.95: score -= 15
+        elif obv_ratio < 1.0: score -= 5
+
+    # 3. Volume Price Analysis (VPA) Days Ratio
+    acc_days = 0
+    dist_days = 0
+    for i in range(1, len(recent)):
+        if recent['Close'].iloc[i] > recent['Close'].iloc[i-1] and recent['Volume'].iloc[i] > recent['Volume'].iloc[i-1]:
+            acc_days += 1
+        elif recent['Close'].iloc[i] < recent['Close'].iloc[i-1] and recent['Volume'].iloc[i] > recent['Volume'].iloc[i-1]:
+            dist_days += 1
             
-    except Exception:
-        pass
+    if acc_days > dist_days:
+        score += 15
+    elif dist_days > acc_days:
+        score -= 15
         
-    return 50.0
+    return float(np.clip(score, 0, 100))
 
 def score_fundamental(fund: dict) -> float:
     score = 50.0
@@ -326,20 +316,21 @@ def analyze_ticker(ticker: str, benchmark_df: pd.DataFrame, weights: dict, secto
     sector = SECTOR_MAP.get(ticker, "Lainnya")
 
     s_liq = score_liquidity(df, min_avg_value)
-    s_trend, t_checks = score_trend_template(df)
+    s_trend = score_trend_template(df)[0]
+    t_checks = score_trend_template(df)[1]
     s_mom = score_momentum(df, benchmark_df)
-    s_broker = score_broker_accumulation(ticker)
+    s_smart_money = score_smart_money_proxy(df)
     s_fund = score_fundamental(fund)
     s_cat = float(sector_bias.get(sector, 50))
 
-    scores_dict = {"likuiditas": s_liq, "teknikal": s_trend, "momentum": s_mom, "broker_flow": s_broker, "fundamental": s_fund, "katalis": s_cat}
+    scores_dict = {"likuiditas": s_liq, "teknikal": s_trend, "momentum": s_mom, "smart_money": s_smart_money, "fundamental": s_fund, "katalis": s_cat}
     total = composite_score(scores_dict, weights)
     
     return {
         "Ticker": ticker.replace(".JK", ""), "Sektor": sector,
         "Harga": round(float(df.iloc[-1]["Close"]), 0), "Skor Total": round(total, 1),
         "Likuiditas": round(s_liq, 1), "Teknikal": round(s_trend, 1),
-        "Momentum": round(s_mom, 1), "Order Flow": round(s_broker, 1),
+        "Momentum": round(s_mom, 1), "Smart Money": round(s_smart_money, 1),
         "Fundamental": round(s_fund, 1), "Katalis/Makro": round(s_cat, 1),
         "_df": df, "_fund": fund, "_trend_checks": t_checks,
     }
@@ -375,12 +366,12 @@ st.sidebar.markdown("**Bobot Analisis Khusus**")
 w_liq = st.sidebar.slider("Likuiditas & Struktur Pasar", 0, 100, int(DEFAULT_WEIGHTS["likuiditas"] * 100))
 w_tren = st.sidebar.slider("Struktur Tren Harga", 0, 100, int(DEFAULT_WEIGHTS["teknikal"] * 100))
 w_mom = st.sidebar.slider("Aktivitas Volume & Momentum", 0, 100, int(DEFAULT_WEIGHTS["momentum"] * 100))
-w_brk = st.sidebar.slider("Akumulasi Broker / Order Flow", 0, 100, int(DEFAULT_WEIGHTS["broker_flow"] * 100))
+w_sm = st.sidebar.slider("Jejak Smart Money (VPA/CMF/OBV)", 0, 100, int(DEFAULT_WEIGHTS["smart_money"] * 100))
 w_fund = st.sidebar.slider("Pertumbuhan Fundamental", 0, 100, int(DEFAULT_WEIGHTS["fundamental"] * 100))
 w_kat = st.sidebar.slider("Sentimen Makro Sektoral", 0, 100, int(DEFAULT_WEIGHTS["katalis"] * 100))
 
-w_sum = max(w_liq + w_tren + w_mom + w_brk + w_fund + w_kat, 1)
-weights = {"likuiditas": w_liq/w_sum, "teknikal": w_tren/w_sum, "momentum": w_mom/w_sum, "broker_flow": w_brk/w_sum, "fundamental": w_fund/w_sum, "katalis": w_kat/w_sum}
+w_sum = max(w_liq + w_tren + w_mom + w_sm + w_fund + w_kat, 1)
+weights = {"likuiditas": w_liq/w_sum, "teknikal": w_tren/w_sum, "momentum": w_mom/w_sum, "smart_money": w_sm/w_sum, "fundamental": w_fund/w_sum, "katalis": w_kat/w_sum}
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Rotasi Sektor Sentimen**")
@@ -400,7 +391,7 @@ run_btn = st.sidebar.button("Mulai Proses Kalkulasi", type="primary", use_contai
 # UI — HEADER
 # ----------------------------------------------------------------------
 st.title("Sistem Skoring Saham Terintegrasi")
-st.caption("Fokus Analisis: Volume Price Analysis (VPA), Order Flow, dan Struktur Tren")
+st.caption("Fokus Analisis: Volume Price Analysis (VPA), Jejak Akumulasi, dan Struktur Tren")
 
 if not run_btn and "screening_results" not in st.session_state:
     st.info("Pilih konfigurasi dan jalankan proses untuk menampilkan data.")
