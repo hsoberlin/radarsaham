@@ -2,9 +2,8 @@
 Dashboard Screening Saham IHSG Multi-Parameter Swing Trading
 ================================================================
 Mengambil data harga via yfinance dan berita via RSS.
-Dilengkapi modul penilaian komposit: Trend, Momentum, 
+Dilengkapi modul penilaian komposit: Trend, Momentum (termasuk Stoch 10,5,5), 
 Proksi Smart Money (VPA / CMF / OBV), Fundamental, dan Makro Sektor.
-Filter Likuiditas diubah menjadi Hard Filter absolut.
 """
 
 import time
@@ -159,6 +158,13 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.clip(upper=0)
     rs = gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan)
     df["RSI14"] = 100 - (100 / (1 + rs))
+    
+    # Stochastic (10, 5, 5)
+    low_10 = df["Low"].rolling(window=10).min()
+    high_10 = df["High"].rolling(window=10).max()
+    fast_k = 100 * ((df["Close"] - low_10) / (high_10 - low_10).replace(0, np.nan))
+    df["Stoch_K"] = fast_k.rolling(window=5).mean()
+    df["Stoch_D"] = df["Stoch_K"].rolling(window=5).mean()
 
     # OBV (On-Balance Volume)
     df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
@@ -205,23 +211,26 @@ def score_trend_template(df: pd.DataFrame) -> tuple[float, dict]:
     }
     return float(100 * sum(checks.values()) / len(checks)), checks
 
-def score_momentum(df: pd.DataFrame, benchmark_df: pd.DataFrame) -> float:
-    if df.empty or len(df) < 60: return 0.0
-    sub = 0.0
+def score_momentum(df: pd.DataFrame, benchmark_df: pd.DataFrame) -> tuple[float, dict]:
+    if df.empty or len(df) < 60: return 0.0, {}
+    last = df.iloc[-1]
+    
+    # 1. Relative Strength vs IHSG
     lb = min(63, len(df) - 1)
     try:
         ret_stock = df["Close"].iloc[-1] / df["Close"].iloc[-lb - 1] - 1
         ret_bench = (benchmark_df["Close"].iloc[-1] / benchmark_df["Close"].iloc[-lb - 1] - 1) if not benchmark_df.empty else 0
-        sub += 0.5 * np.clip(50 + (ret_stock - ret_bench) * 200, 0, 100)
+        rs_score = np.clip(50 + (ret_stock - ret_bench) * 200, 0, 100)
     except:
-        sub += 25.0
+        rs_score = 50.0
 
-    last = df.iloc[-1]
+    # 2. Volume Spike
     if not math.isnan(last.get("VolMA20", np.nan)) and last["VolMA20"] > 0:
-        sub += 0.25 * np.clip(((last["Volume"] / last["VolMA20"]) - 0.5) * 60, 0, 100)
+        vol_score = np.clip(((last["Volume"] / last["VolMA20"]) - 0.5) * 60, 0, 100)
     else: 
-        sub += 12.5
+        vol_score = 50.0
 
+    # 3. RSI 14
     rsi = last.get("RSI14", np.nan)
     if math.isnan(rsi): rsi_score = 50
     elif 50 <= rsi <= 75: rsi_score = 100
@@ -229,9 +238,36 @@ def score_momentum(df: pd.DataFrame, benchmark_df: pd.DataFrame) -> float:
     elif rsi > 85: rsi_score = 30
     elif 35 <= rsi < 50: rsi_score = 60
     else: rsi_score = 30
-    sub += 0.25 * rsi_score
+        
+    # 4. Stochastic (10, 5, 5) Logic
+    stoch_k = last.get("Stoch_K", np.nan)
+    stoch_d = last.get("Stoch_D", np.nan)
+    stoch_status = "Tidak Valid"
+    
+    if math.isnan(stoch_k) or math.isnan(stoch_d):
+        stoch_score = 50.0
+    else:
+        if stoch_k < 50 and stoch_d < 50:
+            if stoch_k >= stoch_d and (stoch_k - stoch_d) <= 8:
+                stoch_score = 100.0
+                stoch_status = f"Golden Cross di bawah 50 (K:{stoch_k:.1f}, D:{stoch_d:.1f})"
+            elif stoch_k < stoch_d and (stoch_d - stoch_k) <= 5:
+                stoch_score = 80.0
+                stoch_status = f"Menuju Golden Cross (K:{stoch_k:.1f}, D:{stoch_d:.1f})"
+            else:
+                stoch_score = 60.0
+                stoch_status = f"Oversold, belum crossing (K:{stoch_k:.1f}, D:{stoch_d:.1f})"
+        elif stoch_k >= 50 and stoch_k > stoch_d:
+            stoch_score = 50.0
+            stoch_status = f"Uptrend di atas 50 (K:{stoch_k:.1f}, D:{stoch_d:.1f})"
+        else:
+            stoch_score = 30.0
+            stoch_status = f"Overbought / Death Cross (K:{stoch_k:.1f}, D:{stoch_d:.1f})"
 
-    return float(np.clip(sub, 0, 100))
+    # Komposit Momentum (RS 35%, Volume 25%, RSI 15%, Stoch 25%)
+    sub = (0.35 * rs_score) + (0.25 * vol_score) + (0.15 * rsi_score) + (0.25 * stoch_score)
+    
+    return float(np.clip(sub, 0, 100)), {"stoch_status": stoch_status}
 
 def score_smart_money_proxy(df: pd.DataFrame) -> float:
     """
@@ -313,7 +349,6 @@ def analyze_ticker(ticker: str, benchmark_df: pd.DataFrame, weights: dict, secto
     if df.empty or len(df) < 60: return None
 
     # --- HARD FILTER LIKUIDITAS ---
-    # Jika rata-rata transaksi 20 hari di bawah input parameter, batalkan dan buang dari antrean
     recent_20 = df.tail(20)
     avg_tx_value = (recent_20["Close"] * recent_20["Volume"]).mean()
     if avg_tx_value < min_avg_value:
@@ -327,7 +362,11 @@ def analyze_ticker(ticker: str, benchmark_df: pd.DataFrame, weights: dict, secto
     s_liq = score_liquidity(df, min_avg_value)
     s_trend = score_trend_template(df)[0]
     t_checks = score_trend_template(df)[1]
-    s_mom = score_momentum(df, benchmark_df)
+    
+    s_mom_result = score_momentum(df, benchmark_df)
+    s_mom = s_mom_result[0]
+    stoch_status = s_mom_result[1]["stoch_status"]
+    
     s_smart_money = score_smart_money_proxy(df)
     s_fund = score_fundamental(fund)
     s_cat = float(sector_bias.get(sector, 50))
@@ -341,6 +380,7 @@ def analyze_ticker(ticker: str, benchmark_df: pd.DataFrame, weights: dict, secto
         "Likuiditas": round(s_liq, 1), "Teknikal": round(s_trend, 1),
         "Momentum": round(s_mom, 1), "Smart Money": round(s_smart_money, 1),
         "Fundamental": round(s_fund, 1), "Katalis/Makro": round(s_cat, 1),
+        "Stoch Status": stoch_status,
         "_df": df, "_fund": fund, "_trend_checks": t_checks,
     }
 
@@ -425,7 +465,7 @@ if last_run: st.caption(f"Waktu Proses Terakhir: {last_run.strftime('%d %b %Y, %
 # ----------------------------------------------------------------------
 # OUTPUT
 # ----------------------------------------------------------------------
-df_results = pd.DataFrame(results).drop(columns=["_df", "_fund", "_trend_checks"]).sort_values("Skor Total", ascending=False)
+df_results = pd.DataFrame(results).drop(columns=["_df", "_fund", "_trend_checks", "Stoch Status"]).sort_values("Skor Total", ascending=False)
 st.subheader(f"Tinjauan Global: {len(df_results)} Emiten Terkualifikasi")
 st.dataframe(df_results.style.background_gradient(subset=["Skor Total"], cmap="Greens"), use_container_width=True, hide_index=True)
 
@@ -441,7 +481,8 @@ for _, row in df_results.head(n_final).iterrows():
             st.subheader(f"{row['Ticker']} — {row['Sektor']}")
             st.metric("Skor Keseluruhan", f"{row['Skor Total']:.1f} / 100")
             st.metric("Level Harga", f"Rp {row['Harga']:,.0f}")
-            with st.expander("Indikator Trend Template"):
+            with st.expander("Detail Indikator & Trend"):
+                st.write(f"[Stoch 10,5,5] {r['Stoch Status']}")
                 for k, v in r["_trend_checks"].items():
                     if k != "note":
                         status = "[Valid]" if v else "[Gagal]"
