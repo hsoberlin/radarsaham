@@ -158,6 +158,8 @@ THEMES = {
     "kertas":   ["INKP","TKIM","FASW"],
     "timah":    ["TINS"],
 }
+# Hanya tema dengan acuan harga gratis. Sisanya sengaja dibiarkan netral —
+# tidak ada proxy batubara/nikel/CPO yang bisa diandalkan tanpa berlangganan.
 COMMODITY_PROXY = {"emas": "GC=F", "tembaga": "HG=F", "minyak": "CL=F"}
 
 RSS_LINKS = [
@@ -170,25 +172,25 @@ RSS_LINKS = [
 ]
 
 # =====================================================================
-# PARAMETER SELEKSI
+# PARAMETER SELEKSI  (sesuai SPESIFIKASI-PARAMETER.md)
 # =====================================================================
 STOCH_SCORE = {
     "GOLDEN CROSS DI JENUH JUAL": 100,
-    "OVERSOLD & MULAI NAIK":        92,
-    "CROSS UP DARI BAWAH":          82,
-    "JENUH JUAL, BELUM BERBALIK":   70,
-    "NAIK DARI ZONA BAWAH":         60,
-    "NAIK DI ZONA TENGAH":          36,
-    "MELEMAH":                       0,
-    "JENUH BELI":                    0,
-    "JENUH BELI, MULAI TURUN":       0,
-    "N/A":                          30,
+    "OVERSOLD & MULAI NAIK":       92,
+    "CROSS UP DARI BAWAH":         82,
+    "JENUH JUAL, BELUM BERBALIK":  70,
+    "NAIK DARI ZONA BAWAH":        60,
+    "NAIK DI ZONA TENGAH":         36,
+    "MELEMAH":                      0,
+    "JENUH BELI":                   0,
+    "JENUH BELI, MULAI TURUN":      0,
+    "N/A":                         30,
 }
 STOCH_BURUK = {"MELEMAH", "JENUH BELI", "JENUH BELI, MULAI TURUN"}
 
 PRESETS = {
-    "SEIMBANG":           {"stoch":30,"vol":30,"akum":18,"peer":12,"struktur":15,"tema":5},
-    "JENUH JUAL":         {"stoch":45,"vol":25,"akum":10,"peer":6, "struktur":10,"tema":0},
+    "SEIMBANG":         {"stoch":30,"vol":30,"akum":18,"peer":12,"struktur":15,"tema":5},
+    "JENUH JUAL":       {"stoch":45,"vol":25,"akum":10,"peer":6, "struktur":10,"tema":0},
     "AKUMULASI SENYAP": {"stoch":18,"vol":35,"akum":40,"peer":10,"struktur":15,"tema":5},
     "KEJAR LAGGARD":    {"stoch":15,"vol":25,"akum":15,"peer":45,"struktur":10,"tema":5},
     "VOLUME BICARA":    {"stoch":20,"vol":50,"akum":25,"peer":6, "struktur":15,"tema":0},
@@ -202,14 +204,15 @@ FALLBACK_UNIVERSE = sorted(set(list(MASTER_AFILIASI) + list(SECTOR_MAP) +
 # =====================================================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def ambil_universe():
+    """Daftar emiten IDX dari screener TradingView. Gagal -> daftar bawaan."""
     if not ADA_REQ:
         return FALLBACK_UNIVERSE, "bawaan"
     try:
-        body = {"filter":[{"left":"type","operation","equal","right":"stock"}],
+        body = {"filter":[{"left":"type","operation":"equal","right":"stock"}],
                 "columns":["name","sector"],"range":[0,1200],
                 "sort":{"sortBy":"name","sortOrder":"asc"}}
         r = requests.post("https://scanner.tradingview.com/indonesia/scan", json=body, timeout=25,
-                        headers={"User-Agent":"Mozilla/5.0"})
+                          headers={"User-Agent":"Mozilla/5.0"})
         rows = r.json().get("data", [])
         tics, sect = [], {}
         for d in rows:
@@ -229,6 +232,7 @@ def ambil_universe():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def ambil_harga(tickers, periode="1y", batch=80):
+    """Unduh bar harian secara batch. Jauh lebih cepat daripada per emiten."""
     keluar = {}
     for i in range(0, len(tickers), batch):
         chunk = [f"{t}.JK" for t in tickers[i:i+batch]]
@@ -300,6 +304,7 @@ def ambil_berita():
 # MESIN METRIK
 # =====================================================================
 def hitung_stoch(df, n=10, sk=5, sd=5):
+    """Stochastic penuh 10,5,5 — %K periode 10 dihaluskan 5, %D = SMA(%K,5)."""
     ll = df["Low"].rolling(n).min()
     hh = df["High"].rolling(n).max()
     raw = 100 * (df["Close"] - ll) / (hh - ll)
@@ -324,6 +329,8 @@ def klasifikasi_stoch(k, d, kp, dp):
 
 
 def profil_volume(C, V, H, L):
+    """Verifikasi volume PER FASE. Rasio agregat 20 hari tidak bisa membedakan
+    apakah volume besar muncul saat naik atau saat turun — ini yang membedakan."""
     n = len(C)
     av20 = float(np.mean(V[-20:])) or 1.0
 
@@ -332,6 +339,7 @@ def profil_volume(C, V, H, L):
     upVolQ = float(np.mean([V[i] for i in naik_i]))/av20 if naik_i else 0.0
     dnVolQ = float(np.mean([V[i] for i in turun_i]))/av20 if turun_i else 0.0
 
+    # --- fase naik ---
     ret5 = C[-1]/C[-6] - 1
     push5 = float(np.mean(V[-5:]))/av20
     if ret5 > 0.01:
@@ -341,6 +349,7 @@ def profil_volume(C, V, H, L):
     elif ret5 < -0.01:      naik_vonis, naik_skor = "SEDANG TURUN", 45
     else:                   naik_vonis, naik_skor = "MENDATAR", 50
 
+    # --- fase turun: cari puncak ayunan, jendela melebar sampai ketemu koreksi >=2% ---
     dryUp, dryBasis, dec, adv, hari = None, None, 0.0, 0.0, 0
     for win in (40, 60, 90, 130):
         look = min(win, n-1)
@@ -360,11 +369,11 @@ def profil_volume(C, V, H, L):
     if dryUp is None and upVolQ > 0 and dnVolQ > 0:
         dryUp, dryBasis = dnVolQ/upVolQ, "harian"
 
-    if dryUp is None:     turun_vonis, turun_skor = "TIDAK TERBACA", 50
-    elif dryUp <= 0.70:   turun_vonis, turun_skor = "VOLUME JUAL MENGERING", 100
-    elif dryUp <= 1.00:   turun_vonis, turun_skor = "VOLUME JUAL MENURUN", 75
-    elif dryUp <= 1.25:   turun_vonis, turun_skor = "VOLUME JUAL SETARA", 30
-    else:                 turun_vonis, turun_skor = "VOLUME JUAL LEBIH BESAR", 0
+    if dryUp is None:      turun_vonis, turun_skor = "TIDAK TERBACA", 50
+    elif dryUp <= 0.70:    turun_vonis, turun_skor = "VOLUME JUAL MENGERING", 100
+    elif dryUp <= 1.00:    turun_vonis, turun_skor = "VOLUME JUAL MENURUN", 75
+    elif dryUp <= 1.25:    turun_vonis, turun_skor = "VOLUME JUAL SETARA", 30
+    else:                  turun_vonis, turun_skor = "VOLUME JUAL LEBIH BESAR", 0
 
     return dict(upVolQ=upVolQ, dnVolQ=dnVolQ, dryUp=dryUp, dryBasis=dryBasis,
                 declineRet=dec, advanceRet=adv, declineDays=hari, ret5=ret5, push5=push5,
@@ -437,7 +446,7 @@ def metrik(kode, df):
     )
 
 # =====================================================================
-# KETINGGALAN SEKELOMPOK
+# KETINGGALAN SEKELOMPOK: GRUP -> TEMA -> SEKTOR
 # =====================================================================
 def hitung_peer_gap(rows):
     r1w = {r["SYMBOL"]: r["RET1W"] for r in rows}
@@ -502,10 +511,17 @@ def komponen_mentah(r, makro):
 
 
 def beri_skor(rows, bobot, makro):
+    """Z-score lintas-saham, lalu dijumlahkan menurut bobot.
+
+    Skor bersifat RELATIF terhadap kandidat yang lolos saringan hari itu —
+    bukan nilai mutlak. Skor 70 saat 15 kandidat berbeda arti dengan skor 70
+    saat 150 kandidat.
+    """
     if not rows:
         return rows
     total = sum(bobot.values()) or 1
     if len(rows) < 5:
+        # sampel terlalu kecil untuk z-score yang berarti; pakai skala mentah
         for r in rows:
             m = komponen_mentah(r, makro)
             r["KONTRIB"] = {k: 0.0 for k in bobot}
@@ -527,6 +543,55 @@ def beri_skor(rows, bobot, makro):
         r["PORTO"] = "15-20% (Aggressive)" if r["CONF"] >= 70 else \
                      ("10% (Medium)" if r["CONF"] >= 58 else "2-5% (Speculative)")
     return rows
+
+def peringkat_semua_preset(rows, makro):
+    """Urutan LENGKAP tiap preset pada kumpulan kandidat yang sama.
+
+    Tidak mengubah CONF/RANK milik preset aktif — skor tiap preset dihitung
+    terpisah lalu hanya diambil urutannya.
+    """
+    if len(rows) < 5:
+        return {p: [r["SYMBOL"] for r in rows] for p in PRESETS}
+    mentah = [komponen_mentah(r, makro) for r in rows]
+    kunci = list(PRESETS["SEIMBANG"].keys())
+    Z = {}
+    for k in kunci:
+        v = np.array([m[k] for m in mentah], dtype=float)
+        s = v.std(ddof=1) or 1.0
+        Z[k] = np.clip((v - v.mean())/s, -3, 3)
+    hasil = {}
+    for nama, bbt in PRESETS.items():
+        tot = sum(bbt.values()) or 1
+        skor = [sum(Z[k][i]*bbt.get(k, 0)/tot for k in kunci) for i in range(len(rows))]
+        urut = sorted(range(len(rows)), key=lambda i: -skor[i])
+        hasil[nama] = [rows[i]["SYMBOL"] for i in urut]
+    return hasil
+
+
+def alokasi_papan(peringkat, mode, top_n=3):
+    """Susun papan dari urutan tiap preset.
+
+    KONSENSUS — tiap preset ambil top_n miliknya apa adanya. Saham yang sama
+    boleh muncul di beberapa preset; itu hasil apa adanya dari parameter.
+
+    EKSKLUSIF — draft bergiliran: tiap preset bergantian mengambil saham
+    peringkat tertinggi yang belum diambil preset lain. Hasilnya nama-nama
+    berbeda yang mewakili selera KHAS tiap preset. Konsekuensinya sebagian
+    pick jadi lebih lemah secara absolut — potensi untung ditukar dengan
+    kemampuan membuktikan preset mana yang benar.
+    """
+    nama_preset = list(peringkat.keys())
+    if mode == "KONSENSUS":
+        return {p: peringkat[p][:top_n] for p in nama_preset}
+    papan = {p: [] for p in nama_preset}
+    terpakai = set()
+    for putaran in range(top_n):
+        for p in nama_preset:
+            pilih = next((t for t in peringkat[p] if t not in terpakai), None)
+            if pilih:
+                papan[p].append(pilih); terpakai.add(pilih)
+    return papan
+
 
 # =====================================================================
 # NARASI
@@ -662,7 +727,7 @@ def bursa_plus(n):
 def tambah_jurnal(r, preset, modal, tp, sl, hold):
     J = muat_jurnal()
     ada = next((x for x in J if x["kode"] == r["SYMBOL"] and x["status"] == "open"), None)
-    if ada:
+    if ada:                                    # satu saham = satu posisi
         pres = str(ada["preset"]).split("|")
         if preset not in pres:
             ada["preset"] = "|".join(pres + [preset])
@@ -742,8 +807,7 @@ st.markdown('<div class="header-container"><div class="header-title">PREDATOR QU
             unsafe_allow_html=True)
 
 brk = (fee_beli+fee_jual)*100
-denom = (tp_pct-brk) + (sl_pct+brk)
-impas = 100*(sl_pct+brk)/denom if denom > 0 else 100
+impas = 100*(sl_pct+brk)/((tp_pct-brk)+(sl_pct+brk)) if (tp_pct-brk) > 0 else 100
 st.markdown(f"""<div class="warnbox">
 <b>Bid/offer, broker summary, dan net foreign tidak ada di sini</b> — ketiganya berlisensi bursa.
 Papan ini menyempitkan daftar; konfirmasi akhir di layar sekuritas.<br>
@@ -825,10 +889,10 @@ with col_main:
     st.dataframe(df_tampil, use_container_width=True, hide_index=True, height=380, column_config={
         "CONF": st.column_config.ProgressColumn("SKOR", min_value=0, max_value=100, format="%.1f"),
         "T/N": st.column_config.NumberColumn("TURUN/NAIK", format="%.2fx",
-                help="Volume saat turun dibagi volume saat naik. Di bawah 0,70 = barang tidak dilepas."),
+               help="Volume saat turun dibagi volume saat naik. Di bawah 0,70 = barang tidak dilepas."),
         "GAP": st.column_config.NumberColumn("KETINGGALAN", format="%.1fpp"),
         "MIN/HARI": st.column_config.NumberColumn("MIN Rp M", format="%.2f",
-                help="Transaksi harian TERKECIL dalam 20 hari, bukan rata-rata."),
+               help="Transaksi harian TERKECIL dalam 20 hari, bukan rata-rata."),
         "STOCH_SIGNAL": st.column_config.TextColumn("KONDISI D1"),
     })
 
@@ -894,39 +958,96 @@ terbuka = [t for t in J if t["status"] == "open"]
 ditutup = [t for t in J if t["status"] == "closed"]
 modal_per = int(modal_total/max(1, jml_posisi))
 
-c1, c2, c3 = st.columns([2, 2, 3])
+m1, m2 = st.columns([1, 3])
+mode_papan = m1.radio("Mode papan", ["KONSENSUS", "EKSKLUSIF"], index=0, horizontal=True,
+    help="KONSENSUS: tiap preset ambil 3 teratasnya apa adanya, boleh sama. "
+         "EKSKLUSIF: draft bergiliran sehingga tiap preset dapat nama berbeda.")
+pick_n = m2.slider("Pick per preset", 1, 6, 3, 1)
+
+urutan = peringkat_semua_preset(lolos, makro)
+papan = alokasi_papan(urutan, mode_papan, pick_n)
+semua_slot = [t for v in papan.values() for t in v]
+unik = list(dict.fromkeys(semua_slot))
+hitung_dup = Counter(semua_slot)
+modal_per_unik = int(modal_total/max(1, len(unik)))
+
+if mode_papan == "KONSENSUS":
+    st.markdown("**Mode konsensus** — tiap preset mengambil pick teratasnya apa adanya. "
+                "Saham yang dipilih beberapa preset dibeli **sekali**; hasilnya tetap dihitung "
+                "untuk setiap preset yang memilihnya.")
+else:
+    st.markdown("**Mode eksklusif** — draft bergiliran, tiap preset mendapat nama berbeda yang "
+                "mewakili selera khasnya. Sebagian pick jadi lebih lemah secara absolut: "
+                "kamu menukar potensi untung dengan kemampuan membuktikan preset mana yang benar.")
+
+baris_papan = []
+for nama, tics in papan.items():
+    b = {"PRESET": nama}
+    for i in range(pick_n):
+        t = tics[i] if i < len(tics) else None
+        b[f"PICK {i+1}"] = ("–" if not t else
+                            (f"{t} ×{hitung_dup[t]}" if hitung_dup[t] > 1 else t))
+    baris_papan.append(b)
+st.dataframe(pd.DataFrame(baris_papan), use_container_width=True, hide_index=True)
+
+pesan = f"{len(semua_slot)} slot → **{len(unik)} saham unik** → Rp {modal_per_unik:,} per posisi".replace(",", ".")
+if mode_papan == "EKSKLUSIF" and len(unik) < len(PRESETS)*pick_n:
+    pesan += (f" · kolam kandidat hanya {len(lolos)} saham, tidak cukup untuk "
+              f"{len(PRESETS)*pick_n} slot berbeda — longgarkan saringan bila ingin penuh")
+st.caption(pesan)
+
+c1, c2, c3 = st.columns([3, 2, 3])
 with c1:
-    pilihan = st.multiselect(f"Pilih kandidat (preset {preset_nama})",
-                             [r["SYMBOL"] for r in lolos[:30]],
-                             default=[r["SYMBOL"] for r in lolos[:3]])
+    tambahan = st.multiselect(
+        "Tambah manual (semua kandidat lolos saringan)",
+        [r["SYMBOL"] for r in lolos], default=[],
+        help="Daftar ini mengikuti saringan di sidebar, bukan preset. "
+             "Untuk saham di luar saringan, pakai kolom di bawah.")
+    luar = st.multiselect("Tambah di luar saringan (seluruh emiten terhitung)",
+                          sorted(r["SYMBOL"] for r in rows), default=[])
 with c2:
-    st.metric("Modal per posisi", f"Rp {modal_per:,}".replace(",", "."))
-    st.caption(f"{len(terbuka)} posisi terbuka · {len(ditutup)} tertutup")
+    st.metric("Modal per posisi", f"Rp {modal_per_unik:,}".replace(",", "."))
+    st.caption(f"{len(terbuka)} terbuka · {len(ditutup)} tertutup")
 with c3:
-    b1, b2, b3 = st.columns(3)
-    if b1.button("➕ Masukkan", use_container_width=True):
+    b1, b2 = st.columns(2)
+    if b1.button(f"➕ Masukkan papan ({len(unik)} posisi)", use_container_width=True):
         n_baru = n_gab = 0
-        for sym in pilihan:
-            r = next((x for x in lolos if x["SYMBOL"] == sym), None)
-            if r:
-                h = tambah_jurnal(r, preset_nama, modal_per, tp_pct, sl_pct, hold_hari)
-                n_baru += (h == "baru"); n_gab += (h == "gabung")
-        st.success(f"{n_baru} posisi baru, {n_gab} digabung ke posisi yang sudah ada.")
+        for nama, tics in papan.items():
+            for t in tics:
+                r = next((x for x in lolos if x["SYMBOL"] == t), None)
+                if r:
+                    hasil = tambah_jurnal(r, nama, modal_per_unik, tp_pct, sl_pct, hold_hari)
+                    n_baru += (hasil == "baru"); n_gab += (hasil == "gabung")
+        st.success(f"{len(semua_slot)} slot disaring jadi {n_baru} posisi baru "
+                   f"({n_gab} preset digabung ke posisi yang sudah ada).")
         st.rerun()
-    if b2.button("🔄 Bagi rata", use_container_width=True):
-        if terbuka:
-            per = int(modal_total/len(terbuka))
-            for t in terbuka:
-                t["lot"] = max(1, int(per // (float(t["harga_beli"])*100)))
-                t["modal"] = round(float(t["harga_beli"])*t["lot"]*100)
-            simpan_jurnal(); st.rerun()
-    if b3.button("🗑️ Kosongkan", use_container_width=True):
-        if st.session_state.get("konfirm_hapus"):
-            st.session_state.jurnal = []; simpan_jurnal()
-            st.session_state.konfirm_hapus = False; st.rerun()
-        else:
-            st.session_state.konfirm_hapus = True
-            st.warning("Klik sekali lagi untuk menghapus SELURUH jurnal.")
+    if b2.button("➕ Masukkan manual", use_container_width=True):
+        n = 0
+        for t in tambahan + luar:
+            r = next((x for x in lolos if x["SYMBOL"] == t), None) or \
+                next((x for x in rows if x["SYMBOL"] == t), None)
+            if r:
+                r.setdefault("CONF", 50.0); r.setdefault("PEER_GAP", 0.0)
+                n += (tambah_jurnal(r, preset_nama, int(modal_total/max(1, jml_posisi)),
+                                    tp_pct, sl_pct, hold_hari) == "baru")
+        st.success(f"{n} posisi ditambahkan atas nama preset {preset_nama}.")
+        st.rerun()
+
+d1, d2 = st.columns(2)
+if d1.button("🔄 Bagi rata modal ke posisi terbuka", use_container_width=True):
+    if terbuka:
+        per = int(modal_total/len(terbuka))
+        for t in terbuka:
+            t["lot"] = max(1, int(per // (float(t["harga_beli"])*100)))
+            t["modal"] = round(float(t["harga_beli"])*t["lot"]*100)
+        simpan_jurnal(); st.rerun()
+if d2.button("🗑️ Kosongkan seluruh jurnal", use_container_width=True):
+    if st.session_state.get("konfirm_hapus"):
+        st.session_state.jurnal = []; simpan_jurnal()
+        st.session_state.konfirm_hapus = False; st.rerun()
+    else:
+        st.session_state.konfirm_hapus = True
+        st.warning("Klik sekali lagi untuk menghapus SELURUH jurnal.")
 
 if terbuka:
     harga_kini = {r["SYMBOL"]: r["PRICE"] for r in rows}
