@@ -158,8 +158,6 @@ THEMES = {
     "kertas":   ["INKP","TKIM","FASW"],
     "timah":    ["TINS"],
 }
-# Hanya tema dengan acuan harga gratis. Sisanya sengaja dibiarkan netral —
-# tidak ada proxy batubara/nikel/CPO yang bisa diandalkan tanpa berlangganan.
 COMMODITY_PROXY = {"emas": "GC=F", "tembaga": "HG=F", "minyak": "CL=F"}
 
 RSS_LINKS = [
@@ -172,25 +170,25 @@ RSS_LINKS = [
 ]
 
 # =====================================================================
-# PARAMETER SELEKSI  (sesuai SPESIFIKASI-PARAMETER.md)
+# PARAMETER SELEKSI
 # =====================================================================
 STOCH_SCORE = {
     "GOLDEN CROSS DI JENUH JUAL": 100,
-    "OVERSOLD & MULAI NAIK":       92,
-    "CROSS UP DARI BAWAH":         82,
-    "JENUH JUAL, BELUM BERBALIK":  70,
-    "NAIK DARI ZONA BAWAH":        60,
-    "NAIK DI ZONA TENGAH":         36,
-    "MELEMAH":                      0,
-    "JENUH BELI":                   0,
-    "JENUH BELI, MULAI TURUN":      0,
-    "N/A":                         30,
+    "OVERSOLD & MULAI NAIK":        92,
+    "CROSS UP DARI BAWAH":          82,
+    "JENUH JUAL, BELUM BERBALIK":   70,
+    "NAIK DARI ZONA BAWAH":         60,
+    "NAIK DI ZONA TENGAH":          36,
+    "MELEMAH":                       0,
+    "JENUH BELI":                    0,
+    "JENUH BELI, MULAI TURUN":       0,
+    "N/A":                          30,
 }
 STOCH_BURUK = {"MELEMAH", "JENUH BELI", "JENUH BELI, MULAI TURUN"}
 
 PRESETS = {
-    "SEIMBANG":         {"stoch":30,"vol":30,"akum":18,"peer":12,"struktur":15,"tema":5},
-    "JENUH JUAL":       {"stoch":45,"vol":25,"akum":10,"peer":6, "struktur":10,"tema":0},
+    "SEIMBANG":           {"stoch":30,"vol":30,"akum":18,"peer":12,"struktur":15,"tema":5},
+    "JENUH JUAL":         {"stoch":45,"vol":25,"akum":10,"peer":6, "struktur":10,"tema":0},
     "AKUMULASI SENYAP": {"stoch":18,"vol":35,"akum":40,"peer":10,"struktur":15,"tema":5},
     "KEJAR LAGGARD":    {"stoch":15,"vol":25,"akum":15,"peer":45,"struktur":10,"tema":5},
     "VOLUME BICARA":    {"stoch":20,"vol":50,"akum":25,"peer":6, "struktur":15,"tema":0},
@@ -204,15 +202,14 @@ FALLBACK_UNIVERSE = sorted(set(list(MASTER_AFILIASI) + list(SECTOR_MAP) +
 # =====================================================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def ambil_universe():
-    """Daftar emiten IDX dari screener TradingView. Gagal -> daftar bawaan."""
     if not ADA_REQ:
         return FALLBACK_UNIVERSE, "bawaan"
     try:
-        body = {"filter":[{"left":"type","operation":"equal","right":"stock"}],
+        body = {"filter":[{"left":"type","operation","equal","right":"stock"}],
                 "columns":["name","sector"],"range":[0,1200],
                 "sort":{"sortBy":"name","sortOrder":"asc"}}
         r = requests.post("https://scanner.tradingview.com/indonesia/scan", json=body, timeout=25,
-                          headers={"User-Agent":"Mozilla/5.0"})
+                        headers={"User-Agent":"Mozilla/5.0"})
         rows = r.json().get("data", [])
         tics, sect = [], {}
         for d in rows:
@@ -232,7 +229,6 @@ def ambil_universe():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def ambil_harga(tickers, periode="1y", batch=80):
-    """Unduh bar harian secara batch. Jauh lebih cepat daripada per emiten."""
     keluar = {}
     for i in range(0, len(tickers), batch):
         chunk = [f"{t}.JK" for t in tickers[i:i+batch]]
@@ -304,7 +300,6 @@ def ambil_berita():
 # MESIN METRIK
 # =====================================================================
 def hitung_stoch(df, n=10, sk=5, sd=5):
-    """Stochastic penuh 10,5,5 — %K periode 10 dihaluskan 5, %D = SMA(%K,5)."""
     ll = df["Low"].rolling(n).min()
     hh = df["High"].rolling(n).max()
     raw = 100 * (df["Close"] - ll) / (hh - ll)
@@ -329,8 +324,6 @@ def klasifikasi_stoch(k, d, kp, dp):
 
 
 def profil_volume(C, V, H, L):
-    """Verifikasi volume PER FASE. Rasio agregat 20 hari tidak bisa membedakan
-    apakah volume besar muncul saat naik atau saat turun — ini yang membedakan."""
     n = len(C)
     av20 = float(np.mean(V[-20:])) or 1.0
 
@@ -339,7 +332,6 @@ def profil_volume(C, V, H, L):
     upVolQ = float(np.mean([V[i] for i in naik_i]))/av20 if naik_i else 0.0
     dnVolQ = float(np.mean([V[i] for i in turun_i]))/av20 if turun_i else 0.0
 
-    # --- fase naik ---
     ret5 = C[-1]/C[-6] - 1
     push5 = float(np.mean(V[-5:]))/av20
     if ret5 > 0.01:
@@ -349,7 +341,6 @@ def profil_volume(C, V, H, L):
     elif ret5 < -0.01:      naik_vonis, naik_skor = "SEDANG TURUN", 45
     else:                   naik_vonis, naik_skor = "MENDATAR", 50
 
-    # --- fase turun: cari puncak ayunan, jendela melebar sampai ketemu koreksi >=2% ---
     dryUp, dryBasis, dec, adv, hari = None, None, 0.0, 0.0, 0
     for win in (40, 60, 90, 130):
         look = min(win, n-1)
@@ -369,11 +360,11 @@ def profil_volume(C, V, H, L):
     if dryUp is None and upVolQ > 0 and dnVolQ > 0:
         dryUp, dryBasis = dnVolQ/upVolQ, "harian"
 
-    if dryUp is None:      turun_vonis, turun_skor = "TIDAK TERBACA", 50
-    elif dryUp <= 0.70:    turun_vonis, turun_skor = "VOLUME JUAL MENGERING", 100
-    elif dryUp <= 1.00:    turun_vonis, turun_skor = "VOLUME JUAL MENURUN", 75
-    elif dryUp <= 1.25:    turun_vonis, turun_skor = "VOLUME JUAL SETARA", 30
-    else:                  turun_vonis, turun_skor = "VOLUME JUAL LEBIH BESAR", 0
+    if dryUp is None:     turun_vonis, turun_skor = "TIDAK TERBACA", 50
+    elif dryUp <= 0.70:   turun_vonis, turun_skor = "VOLUME JUAL MENGERING", 100
+    elif dryUp <= 1.00:   turun_vonis, turun_skor = "VOLUME JUAL MENURUN", 75
+    elif dryUp <= 1.25:   turun_vonis, turun_skor = "VOLUME JUAL SETARA", 30
+    else:                 turun_vonis, turun_skor = "VOLUME JUAL LEBIH BESAR", 0
 
     return dict(upVolQ=upVolQ, dnVolQ=dnVolQ, dryUp=dryUp, dryBasis=dryBasis,
                 declineRet=dec, advanceRet=adv, declineDays=hari, ret5=ret5, push5=push5,
@@ -446,7 +437,7 @@ def metrik(kode, df):
     )
 
 # =====================================================================
-# KETINGGALAN SEKELOMPOK: GRUP -> TEMA -> SEKTOR
+# KETINGGALAN SEKELOMPOK
 # =====================================================================
 def hitung_peer_gap(rows):
     r1w = {r["SYMBOL"]: r["RET1W"] for r in rows}
@@ -511,17 +502,10 @@ def komponen_mentah(r, makro):
 
 
 def beri_skor(rows, bobot, makro):
-    """Z-score lintas-saham, lalu dijumlahkan menurut bobot.
-
-    Skor bersifat RELATIF terhadap kandidat yang lolos saringan hari itu —
-    bukan nilai mutlak. Skor 70 saat 15 kandidat berbeda arti dengan skor 70
-    saat 150 kandidat.
-    """
     if not rows:
         return rows
     total = sum(bobot.values()) or 1
     if len(rows) < 5:
-        # sampel terlalu kecil untuk z-score yang berarti; pakai skala mentah
         for r in rows:
             m = komponen_mentah(r, makro)
             r["KONTRIB"] = {k: 0.0 for k in bobot}
@@ -678,7 +662,7 @@ def bursa_plus(n):
 def tambah_jurnal(r, preset, modal, tp, sl, hold):
     J = muat_jurnal()
     ada = next((x for x in J if x["kode"] == r["SYMBOL"] and x["status"] == "open"), None)
-    if ada:                                    # satu saham = satu posisi
+    if ada:
         pres = str(ada["preset"]).split("|")
         if preset not in pres:
             ada["preset"] = "|".join(pres + [preset])
@@ -758,7 +742,8 @@ st.markdown('<div class="header-container"><div class="header-title">PREDATOR QU
             unsafe_allow_html=True)
 
 brk = (fee_beli+fee_jual)*100
-impas = 100*(sl_pct+brk)/((tp_pct-brk)+(sl_pct+brk)) if (tp_pct-brk) > 0 else 100
+denom = (tp_pct-brk) + (sl_pct+brk)
+impas = 100*(sl_pct+brk)/denom if denom > 0 else 100
 st.markdown(f"""<div class="warnbox">
 <b>Bid/offer, broker summary, dan net foreign tidak ada di sini</b> — ketiganya berlisensi bursa.
 Papan ini menyempitkan daftar; konfirmasi akhir di layar sekuritas.<br>
@@ -840,10 +825,10 @@ with col_main:
     st.dataframe(df_tampil, use_container_width=True, hide_index=True, height=380, column_config={
         "CONF": st.column_config.ProgressColumn("SKOR", min_value=0, max_value=100, format="%.1f"),
         "T/N": st.column_config.NumberColumn("TURUN/NAIK", format="%.2fx",
-               help="Volume saat turun dibagi volume saat naik. Di bawah 0,70 = barang tidak dilepas."),
+                help="Volume saat turun dibagi volume saat naik. Di bawah 0,70 = barang tidak dilepas."),
         "GAP": st.column_config.NumberColumn("KETINGGALAN", format="%.1fpp"),
         "MIN/HARI": st.column_config.NumberColumn("MIN Rp M", format="%.2f",
-               help="Transaksi harian TERKECIL dalam 20 hari, bukan rata-rata."),
+                help="Transaksi harian TERKECIL dalam 20 hari, bukan rata-rata."),
         "STOCH_SIGNAL": st.column_config.TextColumn("KONDISI D1"),
     })
 
