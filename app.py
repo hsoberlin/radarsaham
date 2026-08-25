@@ -215,28 +215,30 @@ FALLBACK_UNIVERSE = sorted(set(list(MASTER_AFILIASI) + list(SECTOR_MAP)))
 def ambil_universe():
     """Daftar emiten IDX dari screener TradingView. Gagal -> daftar bawaan."""
     if not ADA_REQ:
-        return FALLBACK_UNIVERSE, "bawaan"
+        return FALLBACK_UNIVERSE, "bawaan", {}
     try:
         body = {"filter": [{"left": "type", "operation": "equal", "right": "stock"}],
-                "columns": ["name", "sector"], "range": [0, 1200],
+                "columns": ["name", "sector", "market_cap_basic"], "range": [0, 1200],
                 "sort": {"sortBy": "name", "sortOrder": "asc"}}
         r = requests.post("https://scanner.tradingview.com/indonesia/scan",
                           json=body, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
         rows = r.json().get("data", [])
-        tics, sect = [], {}
+        tics, sect, mcap = [], {}, {}
         for d in rows:
             kode = d["d"][0]
             if kode and kode.isalpha() and 3 <= len(kode) <= 5:
                 tics.append(kode)
                 if d["d"][1]:
                     sect.setdefault(kode, d["d"][1])
+                if d["d"][2]:
+                    mcap[kode] = float(d["d"][2])
         if len(tics) > 200:
             for k, v in sect.items():
                 SECTOR_MAP.setdefault(k, v)
-            return sorted(set(tics)), "TradingView"
+            return sorted(set(tics)), "TradingView", mcap
     except Exception:
         pass
-    return FALLBACK_UNIVERSE, "bawaan"
+    return FALLBACK_UNIVERSE, "bawaan", {}
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -341,6 +343,20 @@ def metrik(kode, df, p_masuk, p_keluar):
     )
 
 
+LAPIS_BATAS = [(5e13, "1 · >50 T"), (1e13, "2 · 10-50 T"), (1e12, "3 · 1-10 T"), (0, "4 · <1 T")]
+
+
+def label_lapis(m):
+    """Lapis kapitalisasi. Uji 2 tahun: lapis 3 dan 4 punya peluang cuan >30%
+    sekitar dua kali lipat lapis 1 dan 2, tapi sampelnya bias penyintas."""
+    if not m or m <= 0:
+        return "?"
+    for batas, nama in LAPIS_BATAS:
+        if m >= batas:
+            return nama
+    return "?"
+
+
 def ukuran_unit(ekuitas, N, risiko):
     """1 Unit = (risiko% x ekuitas) / N, dibulatkan ke bawah per lot."""
     if N <= 0 or ekuitas <= 0:
@@ -374,6 +390,18 @@ amb_likuid = st.sidebar.selectbox(
     "Transaksi harian minimal", [0, 1e9, 2e9, 5e9, 1e10],
     index=3, format_func=lambda v: "Tanpa batas" if v == 0 else f"Rp {v/1e9:.0f} miliar")
 harga_min = st.sidebar.number_input("Harga minimal", 0, 100000, 50, 50)
+LAPIS_PILIHAN = [n for _, n in LAPIS_BATAS]
+lapis_dipakai = st.sidebar.multiselect(
+    "Lapis kapitalisasi", LAPIS_PILIHAN + ["?"], default=LAPIS_PILIHAN + ["?"],
+    help="Uji 2 tahun: lapis 3 dan 4 punya peluang cuan >30% dua kali lipat lapis 1 dan 2 "
+         "(23-25% vs 11%), tapi sampelnya bias penyintas dan risiko turunnya lebih besar. "
+         "Bawaan: semua lapis.")
+
+st.sidebar.markdown("### DAFTAR MENDEKATI TEMBUS")
+ambang_dekat = st.sidebar.slider("Jarak maksimal dari level tembus (%)", 1.0, 15.0, 5.0, 0.5,
+                                 help="Peluang tembus besok: jarak 1% = 25%, 2% = 16%, "
+                                      "3% = 11%, 5% = 7%, 8% = 4%.")
+maks_kartu = st.sidebar.number_input("Maksimal kartu ditampilkan (0 = semua)", 0, 200, 0, 5)
 
 st.sidebar.markdown("### TAMPILAN")
 mode_tampil = st.sidebar.radio("Bentuk hasil", ["Tabel (layar lebar)", "Kartu (HP)"], index=0,
@@ -423,7 +451,7 @@ if "hasil" not in st.session_state:
 
 if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
     with st.spinner("Menarik daftar emiten..."):
-        universe, sumber = ambil_universe()
+        universe, sumber, mcap = ambil_universe()
     if mode_universe == "Grup terpantau saja":
         universe = sorted(set(FALLBACK_UNIVERSE) & set(universe)) or FALLBACK_UNIVERSE
     with st.spinner(f"Menarik bar harian {len(universe)} emiten (putaran pertama 2-4 menit)..."):
@@ -440,6 +468,8 @@ if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
 
     d = pd.DataFrame(baris)
     if not d.empty:
+        d["mcap"] = d["kode"].map(mcap).fillna(0)
+        d["lapis"] = d["mcap"].apply(label_lapis)
         d = d[(d["turn_min20"] >= amb_likuid) & (d["harga"] >= harga_min)]
         d["unit_lot"] = d["N"].apply(lambda n: ukuran_unit(ekuitas, n, risiko))
         d["nilai_unit"] = d["unit_lot"] * 100 * d["harga"]
@@ -482,7 +512,8 @@ KOLOM = {"kode": "KODE", "kesegaran": "KESEGARAN", "hari_sejak": "TEMBUS",
          "tinggi20": f"TERTINGGI {p_masuk}H", "jarak": "JARAK", "vol_rasio": "VOL",
          "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT", "sl_2n": "SL 2N",
          "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
-         "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS", "grup": "GRUP", "sektor": "SEKTOR"}
+         "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS", "lapis": "LAPIS",
+         "grup": "GRUP", "sektor": "SEKTOR"}
 URUT = list(KOLOM)
 
 KONF = {
@@ -491,6 +522,8 @@ KONF = {
     "TEMBUS": st.column_config.TextColumn(help="Berapa hari lalu menembus tertinggi 20 hari"),
     "LARI SEJAK": st.column_config.NumberColumn(
         format="%.1f%%", help="Kenaikan harga sejak hari tembus. Makin besar, makin buruk entry-mu."),
+    "LAPIS": st.column_config.TextColumn(
+        help="Kapitalisasi pasar. 1 = di atas Rp50 T, 4 = di bawah Rp1 T."),
     "HARGA": st.column_config.NumberColumn(format="%.0f"),
     "N": st.column_config.NumberColumn(format="%.2f", help="Rata-rata gerak harian 20 hari"),
     "JARAK": st.column_config.NumberColumn(format="%.2f%%", help="Jarak harga ke level tembus"),
@@ -550,18 +583,24 @@ def kartu(sub, kas_bebas):
     <span class="kartu-sl">SL 2N {r['sl_2n']:.1f}</span> &middot;
     rugi 1 unit <b>Rp{rp(r['rugi_unit'])}</b> &middot;
     keluar10H <b>{rp(r['rendah10'])}</b><br>
-    <span style="color:#7c8a94">{r['grup']} &middot; {r['sektor']}</span>
+    <span style="color:#7c8a94">Lapis {r.get('lapis', '?')} &middot; {r['grup']} &middot; {r['sektor']}</span>
   </div>
 </div>""")
     return "".join(blok)
 
 
 urut_segar = {"SEGAR": 0, "MASIH OK": 1, "TERTINGGAL": 2}
+if "lapis" in d.columns and lapis_dipakai:
+    d = d[d["lapis"].isin(lapis_dipakai)]
+    if d.empty:
+        st.warning("Tidak ada saham yang cocok dengan lapis yang dipilih.")
+        st.stop()
+
 sinyal = d[d["tembus"]].copy()
 if not sinyal.empty:
     sinyal["_u"] = sinyal["kesegaran"].map(urut_segar).fillna(3)
     sinyal = sinyal.sort_values(["_u", "lari"], ascending=[True, True])
-dekat = d[(~d["tembus"]) & (d["jarak"] >= -0.05)].sort_values("jarak", ascending=False)
+dekat = d[(~d["tembus"]) & (d["jarak"] >= -ambang_dekat / 100)].sort_values("jarak", ascending=False)
 
 st.markdown(f"<h3 style='font-family:Orbitron;color:#00ffcc;font-size:16px;letter-spacing:2px'>"
             f"SINYAL MASUK &nbsp;—&nbsp; {len(sinyal)} SAHAM</h3>", unsafe_allow_html=True)
@@ -594,14 +633,18 @@ entry-nya jauh lebih buruk. Turtle masuk di HARI tembus, bukan belakangan.</div>
 st.markdown(f"<h3 style='font-family:Orbitron;color:#3d7fff;font-size:16px;letter-spacing:2px;"
             f"margin-top:22px'>MENDEKATI TEMBUS &nbsp;—&nbsp; {len(dekat)} SAHAM</h3>",
             unsafe_allow_html=True)
-st.caption("Belum sinyal. Jangan dibeli. Hanya untuk kamu tahu apa yang mungkin muncul besok.")
+st.caption(f"Belum sinyal. Jangan dibeli. Jarak maksimal {ambang_dekat:.1f}% dari level tembus. "
+           f"Peluang tembus besok menurut uji 1 tahun: jarak 1% = 25%, 2% = 16%, 3% = 11%, "
+           f"5% = 7%, 8% = 4%.")
 if dekat.empty:
-    st.info("Tidak ada yang dalam jarak 5% dari level tembus.")
+    st.info(f"Tidak ada yang dalam jarak {ambang_dekat:.1f}% dari level tembus.")
 else:
     if mode_tampil.startswith("Kartu"):
-        st.markdown(kartu(dekat.head(12), kas), unsafe_allow_html=True)
-        if len(dekat) > 12:
-            st.caption(f"12 teratas dari {len(dekat)}. Unduh CSV untuk daftar penuh.")
+        sub = dekat if maks_kartu == 0 else dekat.head(int(maks_kartu))
+        st.markdown(kartu(sub, kas), unsafe_allow_html=True)
+        if len(sub) < len(dekat):
+            st.caption(f"{len(sub)} teratas dari {len(dekat)}. "
+                       f"Setel 'Maksimal kartu' ke 0 di sidebar untuk menampilkan semua.")
     else:
         st.dataframe(tampil_ringkas(dekat), use_container_width=True, hide_index=True,
                      column_config=KONF, height=min(60 + 35 * len(dekat), 380))
