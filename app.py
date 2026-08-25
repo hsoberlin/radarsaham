@@ -215,15 +215,16 @@ FALLBACK_UNIVERSE = sorted(set(list(MASTER_AFILIASI) + list(SECTOR_MAP)))
 def ambil_universe():
     """Daftar emiten IDX dari screener TradingView. Gagal -> daftar bawaan."""
     if not ADA_REQ:
-        return FALLBACK_UNIVERSE, "bawaan", {}
+        return FALLBACK_UNIVERSE, "bawaan", {}, {}, {}
     try:
         body = {"filter": [{"left": "type", "operation": "equal", "right": "stock"}],
-                "columns": ["name", "sector", "market_cap_basic"], "range": [0, 1200],
+                "columns": ["name", "sector", "market_cap_basic",
+                            "float_shares_percent_current"], "range": [0, 1200],
                 "sort": {"sortBy": "name", "sortOrder": "asc"}}
         r = requests.post("https://scanner.tradingview.com/indonesia/scan",
                           json=body, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
         rows = r.json().get("data", [])
-        tics, sect, mcap = [], {}, {}
+        tics, sect, mcap, ff = [], {}, {}, {}
         for d in rows:
             kode = d["d"][0]
             if kode and kode.isalpha() and 3 <= len(kode) <= 5:
@@ -232,13 +233,15 @@ def ambil_universe():
                     sect.setdefault(kode, d["d"][1])
                 if d["d"][2]:
                     mcap[kode] = float(d["d"][2])
+                if len(d["d"]) > 3 and d["d"][3]:
+                    ff[kode] = float(d["d"][3])
         if len(tics) > 200:
             for k, v in sect.items():
                 SECTOR_MAP.setdefault(k, v)
-            return sorted(set(tics)), "TradingView", mcap
+            return sorted(set(tics)), "TradingView", mcap, ff
     except Exception:
         pass
-    return FALLBACK_UNIVERSE, "bawaan", {}
+    return FALLBACK_UNIVERSE, "bawaan", {}, {}
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -333,6 +336,7 @@ def metrik(kode, df, p_masuk, p_keluar):
         kode=kode, harga=float(C[-1]), N=float(n),
         tinggi20=tinggi, rendah10=rendah,
         vol_rasio=float(V[-1] / volrata),
+        rp1pct=rupiah_per_1persen(df),
         turn_min20=float(np.min(tv)), turn_med=float(np.median(tv)),
         tembus=bool(C[-1] > tinggi),
         hari_sejak=hari_sejak, lari=lari,
@@ -343,18 +347,35 @@ def metrik(kode, df, p_masuk, p_keluar):
     )
 
 
-LAPIS_BATAS = [(5e13, "1 · >50 T"), (1e13, "2 · 10-50 T"), (1e12, "3 · 1-10 T"), (0, "4 · <1 T")]
+BOBOT_BATAS = [(200e9, "SANGAT BERAT"), (50e9, "BERAT"), (10e9, "SEDANG"), (0, "RINGAN")]
+BOBOT_PILIHAN = ["RINGAN", "SEDANG", "BERAT", "SANGAT BERAT", "?"]
 
 
-def label_lapis(m):
-    """Lapis kapitalisasi. Uji 2 tahun: lapis 3 dan 4 punya peluang cuan >30%
-    sekitar dua kali lipat lapis 1 dan 2, tapi sampelnya bias penyintas."""
-    if not m or m <= 0:
+def rupiah_per_1persen(df, jendela=60, min_nilai=1e6):
+    """Amihud: berapa rupiah transaksi dibutuhkan untuk menggerakkan harga 1%.
+
+    Median dipakai, bukan rata-rata — rata-rata terseret hari-hari sepi.
+    Jendela 60 hari supaya mencerminkan keadaan sekarang, bukan setahun lalu.
+    """
+    sub = df.tail(jendela)
+    C = sub["Close"]
+    nilai = C * sub["Volume"]
+    ret = C.pct_change().abs()
+    m = (nilai > min_nilai) & ret.notna() & (ret > 0)
+    if int(m.sum()) < 25:
+        return np.nan
+    rasio = float((ret[m] / nilai[m]).median())
+    return 0.01 / rasio if rasio > 0 else np.nan
+
+
+def label_bobot(v):
+    """Seberapa mahal menggerakkan harga saham ini 1%."""
+    if v is None or not np.isfinite(v) or v <= 0:
         return "?"
-    for batas, nama in LAPIS_BATAS:
-        if m >= batas:
+    for batas, nama in BOBOT_BATAS:
+        if v >= batas:
             return nama
-    return "?"
+    return "RINGAN"
 
 
 def ukuran_unit(ekuitas, N, risiko):
@@ -390,12 +411,11 @@ amb_likuid = st.sidebar.selectbox(
     "Transaksi harian minimal", [0, 1e9, 2e9, 5e9, 1e10],
     index=3, format_func=lambda v: "Tanpa batas" if v == 0 else f"Rp {v/1e9:.0f} miliar")
 harga_min = st.sidebar.number_input("Harga minimal", 0, 100000, 50, 50)
-LAPIS_PILIHAN = [n for _, n in LAPIS_BATAS]
-lapis_dipakai = st.sidebar.multiselect(
-    "Lapis kapitalisasi", LAPIS_PILIHAN + ["?"], default=LAPIS_PILIHAN + ["?"],
-    help="Uji 2 tahun: lapis 3 dan 4 punya peluang cuan >30% dua kali lipat lapis 1 dan 2 "
-         "(23-25% vs 11%), tapi sampelnya bias penyintas dan risiko turunnya lebih besar. "
-         "Bawaan: semua lapis.")
+bobot_dipakai = st.sidebar.multiselect(
+    "Bobot pasar (Rp untuk gerak 1%)", BOBOT_PILIHAN, default=BOBOT_PILIHAN,
+    help="RINGAN < Rp10 M · SEDANG Rp10-50 M · BERAT Rp50-200 M · SANGAT BERAT > Rp200 M. "
+         "Makin ringan, makin sedikit uang yang dibutuhkan untuk menggerakkan harga 1% — "
+         "naik maupun turun. Pembanding: BBCA butuh Rp643 miliar, PACK cuma Rp8 miliar.")
 
 st.sidebar.markdown("### DAFTAR MENDEKATI TEMBUS")
 ambang_dekat = st.sidebar.slider("Jarak maksimal dari level tembus (%)", 1.0, 15.0, 5.0, 0.5,
@@ -451,7 +471,7 @@ if "hasil" not in st.session_state:
 
 if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
     with st.spinner("Menarik daftar emiten..."):
-        universe, sumber, mcap = ambil_universe()
+        universe, sumber, mcap, ff = ambil_universe()
     if mode_universe == "Grup terpantau saja":
         universe = sorted(set(FALLBACK_UNIVERSE) & set(universe)) or FALLBACK_UNIVERSE
     with st.spinner(f"Menarik bar harian {len(universe)} emiten (putaran pertama 2-4 menit)..."):
@@ -469,7 +489,8 @@ if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
     d = pd.DataFrame(baris)
     if not d.empty:
         d["mcap"] = d["kode"].map(mcap).fillna(0)
-        d["lapis"] = d["mcap"].apply(label_lapis)
+        d["ff"] = d["kode"].map(ff)
+        d["bobot"] = d["rp1pct"].apply(label_bobot)
         d = d[(d["turn_min20"] >= amb_likuid) & (d["harga"] >= harga_min)]
         d["unit_lot"] = d["N"].apply(lambda n: ukuran_unit(ekuitas, n, risiko))
         d["nilai_unit"] = d["unit_lot"] * 100 * d["harga"]
@@ -512,7 +533,8 @@ KOLOM = {"kode": "KODE", "kesegaran": "KESEGARAN", "hari_sejak": "TEMBUS",
          "tinggi20": f"TERTINGGI {p_masuk}H", "jarak": "JARAK", "vol_rasio": "VOL",
          "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT", "sl_2n": "SL 2N",
          "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
-         "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS", "lapis": "LAPIS",
+         "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS",
+         "bobot": "BOBOT", "rp1pct": "Rp/1%", "ff": "FF%",
          "grup": "GRUP", "sektor": "SEKTOR"}
 URUT = list(KOLOM)
 
@@ -522,8 +544,12 @@ KONF = {
     "TEMBUS": st.column_config.TextColumn(help="Berapa hari lalu menembus tertinggi 20 hari"),
     "LARI SEJAK": st.column_config.NumberColumn(
         format="%.1f%%", help="Kenaikan harga sejak hari tembus. Makin besar, makin buruk entry-mu."),
-    "LAPIS": st.column_config.TextColumn(
-        help="Kapitalisasi pasar. 1 = di atas Rp50 T, 4 = di bawah Rp1 T."),
+    "BOBOT": st.column_config.TextColumn(
+        help="RINGAN < Rp10 M · SEDANG Rp10-50 M · BERAT Rp50-200 M · SANGAT BERAT > Rp200 M"),
+    "Rp/1%": st.column_config.NumberColumn(
+        format="%.0f", help="Rupiah transaksi yang dibutuhkan untuk menggerakkan harga 1% "
+                            "(Amihud, median 60 hari). Berlaku dua arah: naik maupun turun."),
+    "FF%": st.column_config.NumberColumn(format="%.0f%%", help="Persentase saham beredar bebas"),
     "HARGA": st.column_config.NumberColumn(format="%.0f"),
     "N": st.column_config.NumberColumn(format="%.2f", help="Rata-rata gerak harian 20 hari"),
     "JARAK": st.column_config.NumberColumn(format="%.2f%%", help="Jarak harga ke level tembus"),
@@ -583,17 +609,19 @@ def kartu(sub, kas_bebas):
     <span class="kartu-sl">SL 2N {r['sl_2n']:.1f}</span> &middot;
     rugi 1 unit <b>Rp{rp(r['rugi_unit'])}</b> &middot;
     keluar10H <b>{rp(r['rendah10'])}</b><br>
-    <span style="color:#7c8a94">Lapis {r.get('lapis', '?')} &middot; {r['grup']} &middot; {r['sektor']}</span>
+    Bobot <b>{r.get('bobot', '?')}</b> &middot; gerak 1% butuh
+    <b>Rp{rp(r['rp1pct']) if np.isfinite(r.get('rp1pct', np.nan)) else '-'}</b><br>
+    <span style="color:#7c8a94">{r['grup']} &middot; {r['sektor']}</span>
   </div>
 </div>""")
     return "".join(blok)
 
 
 urut_segar = {"SEGAR": 0, "MASIH OK": 1, "TERTINGGAL": 2}
-if "lapis" in d.columns and lapis_dipakai:
-    d = d[d["lapis"].isin(lapis_dipakai)]
+if "bobot" in d.columns and bobot_dipakai:
+    d = d[d["bobot"].isin(bobot_dipakai)]
     if d.empty:
-        st.warning("Tidak ada saham yang cocok dengan lapis yang dipilih.")
+        st.warning("Tidak ada saham yang cocok dengan bobot pasar yang dipilih.")
         st.stop()
 
 sinyal = d[d["tembus"]].copy()
