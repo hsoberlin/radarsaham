@@ -74,6 +74,32 @@ st.markdown("""
 [data-testid="stDataFrame"] div[role="gridcell"]{background:#020406!important;color:#e0e0e0!important;
   font-family:'JetBrains Mono'!important;border-bottom:1px solid #222!important}
 section[data-testid="stSidebar"]{background:#060a0f;border-right:1px solid #222}
+/* --- keterbacaan: paksa teks terang di seluruh komponen --- */
+.stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div{color:#e8edf0}
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p{color:#9fb0bb!important}
+[data-testid="stMarkdownContainer"] p{color:#e8edf0}
+.stAlert, .stAlert p{color:#e8edf0!important}
+section[data-testid="stSidebar"] *{color:#dfe7ec!important}
+section[data-testid="stSidebar"] .stSlider label,
+section[data-testid="stSidebar"] .stNumberInput label,
+section[data-testid="stSidebar"] .stRadio label,
+section[data-testid="stSidebar"] .stSelectbox label{color:#00ffcc!important;font-weight:600}
+input, textarea, select{color:#ffffff!important;background:#0d1319!important}
+[data-baseweb="select"] div{color:#ffffff!important}
+/* --- layar sempit (HP) --- */
+@media (max-width:820px){
+  .header-title{font-size:22px!important;letter-spacing:2px}
+  .header-sub{font-size:8px;letter-spacing:1px}
+  .macro-strip{gap:4px;padding:6px}
+  .macro-item{font-size:10px;min-width:31%}
+  .macro-label{font-size:8px}
+  .aturan{font-size:11px;line-height:1.75}
+  .catatan{font-size:10.5px}
+  .kosong{padding:24px 12px}
+  .kosong-judul{font-size:15px;letter-spacing:2px}
+  .kosong-sub{font-size:11px}
+  .block-container{padding-left:.6rem!important;padding-right:.6rem!important}
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -254,8 +280,22 @@ def metrik(kode, df, p_masuk, p_keluar):
     n = hitung_N(df, 20)
     if not np.isfinite(n) or n <= 0:
         return None
-    tinggi = float(df["High"].shift(1).rolling(p_masuk).max().iloc[-1])
+    seri_tinggi = df["High"].shift(1).rolling(p_masuk).max()
+    tinggi = float(seri_tinggi.iloc[-1])
     rendah = float(df["Low"].shift(1).rolling(p_keluar).min().iloc[-1])
+
+    # berapa hari sejak tembus PERTAMA dalam rentetan yang sedang berjalan,
+    # dan berapa jauh harga sudah lari sejak hari itu
+    tembus_seri = (df["Close"] > seri_tinggi).values
+    hari_sejak, lari = np.nan, np.nan
+    if len(tembus_seri) and bool(tembus_seri[-1]):
+        i = len(tembus_seri) - 1
+        while i > 0 and tembus_seri[i]:
+            i -= 1
+        awal = i + 1
+        hari_sejak = float(len(tembus_seri) - 1 - awal)
+        if C[awal] > 0:
+            lari = float(C[-1] / C[awal] - 1)
     volrata = float(np.mean(V[-21:-1])) or 1.0
     tv = (C * V)[-20:]
     return dict(
@@ -264,6 +304,7 @@ def metrik(kode, df, p_masuk, p_keluar):
         vol_rasio=float(V[-1] / volrata),
         turn_min20=float(np.min(tv)), turn_med=float(np.median(tv)),
         tembus=bool(C[-1] > tinggi),
+        hari_sejak=hari_sejak, lari=lari,
         jarak=float(C[-1] / tinggi - 1) if tinggi else np.nan,
         grup=MASTER_AFILIASI.get(kode, "-"),
         sektor=SECTOR_MAP.get(kode, "-"),
@@ -365,6 +406,11 @@ if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
         d["rugi_unit"] = d["unit_lot"] * 100 * 2 * d["N"]
         d["pct_kas"] = d["nilai_unit"] / kas * 100 if kas else np.nan
         d["muat"] = np.where(d["nilai_unit"] <= kas, "YA", "TIDAK")
+        d["kesegaran"] = np.where(
+            ~d["tembus"], "-",
+            np.where(d["hari_sejak"].fillna(99) == 0, "SEGAR",
+            np.where((d["hari_sejak"].fillna(99) <= 2) & (d["lari"].fillna(9) < 0.05),
+                     "MASIH OK", "TERTINGGAL")))
     st.session_state.hasil = d
     st.session_state.info = (sumber, len(harga), len(d) if not d.empty else 0)
 
@@ -390,13 +436,20 @@ st.markdown(f"<div style='text-align:center;color:#5a666e;font-family:JetBrains 
             f"{datetime.now(WIB).strftime('%d %b %Y %H:%M WIB')}</div>",
             unsafe_allow_html=True)
 
-KOLOM = {"kode": "KODE", "harga": "HARGA", "N": "N", "tinggi20": f"TERTINGGI {p_masuk}H",
-         "jarak": "JARAK", "vol_rasio": "VOL", "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT",
-         "sl_2n": "SL 2N", "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
+KOLOM = {"kode": "KODE", "kesegaran": "KESEGARAN", "hari_sejak": "TEMBUS",
+         "lari": "LARI SEJAK", "harga": "HARGA", "N": "N",
+         "tinggi20": f"TERTINGGI {p_masuk}H", "jarak": "JARAK", "vol_rasio": "VOL",
+         "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT", "sl_2n": "SL 2N",
+         "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
          "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS", "grup": "GRUP", "sektor": "SEKTOR"}
 URUT = list(KOLOM)
 
 KONF = {
+    "KESEGARAN": st.column_config.TextColumn(
+        help="SEGAR = tembus hari ini. TERTINGGAL = sudah lari jauh sejak tembus."),
+    "TEMBUS": st.column_config.TextColumn(help="Berapa hari lalu menembus tertinggi 20 hari"),
+    "LARI SEJAK": st.column_config.NumberColumn(
+        format="%.1f%%", help="Kenaikan harga sejak hari tembus. Makin besar, makin buruk entry-mu."),
     "HARGA": st.column_config.NumberColumn(format="%.0f"),
     "N": st.column_config.NumberColumn(format="%.2f", help="Rata-rata gerak harian 20 hari"),
     "JARAK": st.column_config.NumberColumn(format="%.2f%%", help="Jarak harga ke level tembus"),
@@ -412,10 +465,17 @@ KONF = {
 def tampil(sub):
     t = sub[URUT].rename(columns=KOLOM).copy()
     t["JARAK"] = t["JARAK"] * 100
+    t["LARI SEJAK"] = t["LARI SEJAK"] * 100
+    t["TEMBUS"] = t["TEMBUS"].apply(
+        lambda v: "-" if pd.isna(v) else ("hari ini" if v == 0 else f"{int(v)} hari lalu"))
     return t
 
 
-sinyal = d[d["tembus"]].sort_values("nilai_unit", ascending=False)
+urut_segar = {"SEGAR": 0, "MASIH OK": 1, "TERTINGGAL": 2}
+sinyal = d[d["tembus"]].copy()
+if not sinyal.empty:
+    sinyal["_u"] = sinyal["kesegaran"].map(urut_segar).fillna(3)
+    sinyal = sinyal.sort_values(["_u", "lari"], ascending=[True, True])
 dekat = d[(~d["tembus"]) & (d["jarak"] >= -0.05)].sort_values("jarak", ascending=False)
 
 st.markdown(f"<h3 style='font-family:Orbitron;color:#00ffcc;font-size:16px;letter-spacing:2px'>"
@@ -431,8 +491,17 @@ else:
     st.dataframe(tampil(sinyal), use_container_width=True, hide_index=True,
                  column_config=KONF, height=min(60 + 35 * len(sinyal), 420))
     muat = sinyal[sinyal["muat"] == "YA"]
+    n_segar = int((sinyal["kesegaran"] == "SEGAR").sum())
+    n_tinggal = int((sinyal["kesegaran"] == "TERTINGGAL").sum())
     st.caption(f"{len(muat)} dari {len(sinyal)} muat di kas Rp{kas:,.0f}".replace(",", ".") +
-               " · sisanya nilai 1 unit-nya melebihi kas bebas.")
+               f" · {n_segar} tembus hari ini · {n_tinggal} sudah tertinggal.")
+    if n_tinggal:
+        st.markdown(
+            f"""<div class="catatan"><b>{n_tinggal} saham berlabel TERTINGGAL.</b>
+Mereka menembus beberapa hari lalu dan harganya sudah lari jauh setelah itu. Sinyalnya masih
+menyala, tapi stop 2N-mu akan diukur dari harga yang sudah naik — risiko rupiahnya sama,
+entry-nya jauh lebih buruk. Turtle masuk di HARI tembus, bukan belakangan.</div>""",
+            unsafe_allow_html=True)
 
 st.markdown(f"<h3 style='font-family:Orbitron;color:#3d7fff;font-size:16px;letter-spacing:2px;"
             f"margin-top:22px'>MENDEKATI TEMBUS &nbsp;—&nbsp; {len(dekat)} SAHAM</h3>",
@@ -457,4 +526,3 @@ st.download_button("Unduh hasil pindai (CSV)",
 
 st.caption("Data Yahoo Finance, tertunda 10-15 menit · N dihitung dengan Wilder 20 hari "
            "sesuai rumus asli Turtle · bukan rekomendasi investasi")
-
