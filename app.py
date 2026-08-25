@@ -1,0 +1,460 @@
+"""
+TURTLE BOARD
+============
+Pemindai Donchian 20 hari + kalkulator ukuran Unit (N) untuk Bursa Efek Indonesia.
+
+Aturan asli Turtle System 1 (Dennis & Eckhardt):
+    N          = Wilder smoothing 20 hari dari True Range
+    1 Unit     = (risiko% x ekuitas) / N, dibulatkan ke bawah per lot
+    Masuk      = penutupan menembus tertinggi 20 hari sebelumnya
+    Stop Loss  = harga masuk - 2N   (rugi 1 unit = 2 x risiko%)
+    Tambah     = tiap naik 0,5N, maksimum 4 unit per saham
+    Keluar     = penutupan di bawah terendah 10 hari sebelumnya
+    Batas      = 4 per saham, 6 grup berkorelasi, 10 sektor, 12 satu arah
+    TIDAK ADA take profit. TIDAK ADA batas waktu tahan. TIDAK ADA skor.
+
+Dua tambahan di luar buku, wajib untuk IDX tanpa margin:
+    - saringan likuiditas (transaksi harian TERKECIL 20 hari)
+    - batas kas (nilai posisi tidak boleh melebihi kas)
+
+Jalankan:  streamlit run turtle_board.py
+Kebutuhan: streamlit yfinance pandas numpy requests
+"""
+
+import warnings
+from datetime import datetime, timedelta, timezone
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import yfinance as yf
+
+try:
+    import requests
+    ADA_REQ = True
+except Exception:
+    ADA_REQ = False
+
+warnings.filterwarnings("ignore")
+st.set_page_config(page_title="TURTLE BOARD", layout="wide")
+
+WIB = timezone(timedelta(hours=7))
+
+# =====================================================================
+# TAMPILAN
+# =====================================================================
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@500;800&family=Inter:wght@400;600&display=swap');
+.stApp { background-color:#020406; color:#fff; }
+.header-container{padding:14px;background:rgba(0,255,204,.02);border-radius:10px;
+  border:1px solid rgba(0,255,204,.1);text-align:center;margin-bottom:14px}
+.header-title{font-family:'Orbitron',sans-serif!important;font-weight:900;font-size:32px!important;
+  background:linear-gradient(90deg,#00ffcc,#3d7fff);-webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;letter-spacing:5px}
+.header-sub{font-family:'JetBrains Mono';font-size:10px;color:#7c8a94;letter-spacing:2px;margin-top:4px}
+.macro-strip{display:flex;justify-content:space-around;background:#0a0e14;padding:9px;
+  border-radius:5px;border:1px solid #333;margin-bottom:14px;flex-wrap:wrap;gap:6px}
+.macro-item{font-family:'JetBrains Mono';font-size:12px;text-align:center}
+.macro-label{font-size:9px;color:#888;display:block;margin-bottom:2px;letter-spacing:1px}
+.macro-val-up{color:#00ffcc;font-weight:bold}
+.macro-val-down{color:#ff6b6b;font-weight:bold}
+.kosong{background:rgba(10,14,20,.9);border:1px solid #2a3038;border-radius:8px;
+  padding:34px 20px;text-align:center;margin:18px 0}
+.kosong-judul{font-family:'Orbitron';font-size:20px;color:#7c8a94;letter-spacing:3px}
+.kosong-sub{font-family:'Inter';font-size:12px;color:#5a666e;margin-top:10px;line-height:1.7}
+.aturan{background:rgba(2,20,20,.5);border-left:2px solid #00ffcc;padding:11px 14px;
+  border-radius:4px;font-family:'Inter';font-size:11.5px;color:#c9d3d8;line-height:1.65}
+.aturan b{color:#fff}
+.catatan{background:rgba(255,180,0,.05);border-left:2px solid #ffb400;padding:9px 12px;
+  border-radius:4px;font-family:'Inter';font-size:11px;color:#c9d3d8;margin-bottom:12px}
+[data-testid="stDataFrame"]{border:1px solid #333!important}
+[data-testid="stDataFrame"] div[role="columnheader"]{background:#0a0e14!important;color:#00ffcc!important;
+  font-family:'Orbitron'!important;font-weight:800!important;border-bottom:1px solid #444!important}
+[data-testid="stDataFrame"] div[role="gridcell"]{background:#020406!important;color:#e0e0e0!important;
+  font-family:'JetBrains Mono'!important;border-bottom:1px solid #222!important}
+section[data-testid="stSidebar"]{background:#060a0f;border-right:1px solid #222}
+</style>
+""", unsafe_allow_html=True)
+
+# =====================================================================
+# PETA GRUP DAN SEKTOR  (untuk batas korelasi, bukan untuk memilih saham)
+# =====================================================================
+MASTER_AFILIASI = {
+    "BREN": "PRAJOGO", "TPIA": "PRAJOGO", "CUAN": "PRAJOGO", "BRPT": "PRAJOGO",
+    "PTRO": "PRAJOGO", "CGAS": "PRAJOGO", "CDIA": "PRAJOGO", "GZCO": "PRAJOGO",
+    "BUMI": "BAKRIE", "BRMS": "BAKRIE", "ENRG": "BAKRIE", "DEWA": "BAKRIE",
+    "BNBR": "BAKRIE", "UNSP": "BAKRIE", "VIVA": "BAKRIE", "MDIA": "BAKRIE",
+    "JGLE": "BAKRIE", "ALII": "BAKRIE", "ELTY": "BAKRIE", "BTEL": "BAKRIE", "VKTR": "BAKRIE",
+    "AMMN": "SALIM", "INDF": "SALIM", "ICBP": "SALIM", "LSIP": "SALIM", "SIMP": "SALIM",
+    "META": "SALIM", "ROTI": "SALIM", "IMAS": "SALIM", "DNET": "SALIM", "MEDC": "SALIM",
+    "DSSA": "SINAR MAS", "BSDE": "SINAR MAS", "INKP": "SINAR MAS", "TKIM": "SINAR MAS",
+    "SMMA": "SINAR MAS", "DUTI": "SINAR MAS", "SMAR": "SINAR MAS", "FREN": "SINAR MAS",
+    "DMAS": "SINAR MAS",
+    "PANI": "AGUAN", "MKPI": "AGUAN", "ASRI": "AGUAN", "CBDK": "AGUAN",
+    "ADRO": "BOY THOHIR", "ADMR": "BOY THOHIR", "ESSA": "BOY THOHIR",
+    "MBMA": "BOY THOHIR", "MDKA": "BOY THOHIR",
+    "DRMA": "TP RACHMAT", "TAPG": "TP RACHMAT", "DSNG": "TP RACHMAT",
+    "ASSA": "TP RACHMAT", "ASLC": "TP RACHMAT",
+    "RAJA": "HAPSORO", "CBRE": "HAPSORO", "PSAB": "HAPSORO", "MINA": "HAPSORO", "OASA": "HAPSORO",
+    "JIHD": "TOMY WINATA", "SCBD": "TOMY WINATA", "TINY": "TOMY WINATA",
+    "KPIG": "MNC", "BHIT": "MNC", "MNCN": "MNC", "IPTV": "MNC", "BABP": "MNC", "BCAP": "MNC",
+    "LPKR": "LIPPO", "LPPF": "LIPPO", "MLPL": "LIPPO", "MPPA": "LIPPO",
+    "SILO": "LIPPO", "LPCK": "LIPPO", "MLPT": "LIPPO",
+    "GOTO": "TECH", "BUKA": "TECH", "ARTO": "TECH", "EMTK": "EMTEK", "SCMA": "EMTEK",
+    "BBRI": "BUMN", "BMRI": "BUMN", "BBNI": "BUMN", "BBTN": "BUMN", "BRIS": "BUMN",
+    "TLKM": "BUMN", "ANTM": "BUMN", "PTBA": "BUMN", "TINS": "BUMN", "PGAS": "BUMN",
+    "SMGR": "BUMN", "JSMR": "BUMN", "PGEO": "BUMN", "MTEL": "BUMN",
+    "WIKA": "BUMN KARYA", "PTPP": "BUMN KARYA", "ADHI": "BUMN KARYA",
+    "WTON": "BUMN KARYA", "WEGE": "BUMN KARYA", "PPRE": "BUMN KARYA",
+    "ASII": "ASTRA", "UNTR": "ASTRA", "AALI": "ASTRA", "ASGR": "ASTRA", "AUTO": "ASTRA",
+    "BBCA": "DJARUM", "TOWR": "DJARUM", "SUPR": "DJARUM",
+    "PNBN": "PANIN", "PNIN": "PANIN", "PNLF": "PANIN", "CFIN": "PANIN",
+    "AMRT": "ALFAMART", "MIDI": "ALFAMART", "BUDI": "SUNGAI BUDI", "TBLA": "SUNGAI BUDI",
+    "MEGA": "CT CORP", "BBHI": "CT CORP",
+    "SRTG": "SARATOGA", "TBIG": "SARATOGA", "MPMX": "SARATOGA",
+}
+
+SECTOR_MAP = {
+    "BBCA": "FINANCE", "BBRI": "FINANCE", "BMRI": "FINANCE", "BBNI": "FINANCE",
+    "BBTN": "FINANCE", "BRIS": "FINANCE", "ARTO": "FINANCE", "BJBR": "FINANCE",
+    "BJTM": "FINANCE", "TUGU": "FINANCE", "PNBN": "FINANCE", "BDMN": "FINANCE",
+    "BBHI": "FINANCE", "SRTG": "FINANCE", "ADMF": "FINANCE", "BNGA": "FINANCE",
+    "BNII": "FINANCE", "NISP": "FINANCE",
+    "ADRO": "ENERGY", "PTBA": "ENERGY", "ITMG": "ENERGY", "BYAN": "ENERGY",
+    "HRUM": "ENERGY", "INDY": "ENERGY", "MEDC": "ENERGY", "ELSA": "ENERGY",
+    "PGAS": "ENERGY", "AKRA": "ENERGY", "DOID": "ENERGY", "BUMI": "ENERGY",
+    "ENRG": "ENERGY", "RAJA": "ENERGY", "ADMR": "ENERGY", "GEMS": "ENERGY",
+    "BSSR": "ENERGY", "PGEO": "ENERGY", "TOBA": "ENERGY",
+    "ANTM": "BASIC-MAT", "MDKA": "BASIC-MAT", "INCO": "BASIC-MAT", "TINS": "BASIC-MAT",
+    "MBMA": "BASIC-MAT", "NCKL": "BASIC-MAT", "BRMS": "BASIC-MAT", "PSAB": "BASIC-MAT",
+    "INKP": "BASIC-MAT", "TKIM": "BASIC-MAT", "SMGR": "BASIC-MAT", "INTP": "BASIC-MAT",
+    "TPIA": "BASIC-MAT", "BRPT": "BASIC-MAT", "ESSA": "BASIC-MAT", "LTLS": "BASIC-MAT",
+    "AMMN": "BASIC-MAT", "ARCI": "BASIC-MAT", "HRTA": "BASIC-MAT",
+    "TLKM": "INFRA", "ISAT": "INFRA", "EXCL": "INFRA", "FREN": "INFRA", "JSMR": "INFRA",
+    "TBIG": "INFRA", "TOWR": "INFRA", "MTEL": "INFRA", "META": "INFRA", "PPRE": "INFRA",
+    "ADHI": "INFRA", "WIKA": "INFRA", "PTPP": "INFRA",
+    "ICBP": "CONSUMER", "INDF": "CONSUMER", "UNVR": "CONSUMER", "MYOR": "CONSUMER",
+    "AMRT": "CONSUMER", "MIDI": "CONSUMER", "ACES": "CONSUMER", "MAPI": "CONSUMER",
+    "MAPA": "CONSUMER", "CPIN": "CONSUMER", "JPFA": "CONSUMER", "GGRM": "CONSUMER",
+    "HMSP": "CONSUMER", "KLBF": "CONSUMER", "SIDO": "CONSUMER", "AUTO": "CONSUMER",
+    "ASII": "CONSUMER", "ERAA": "CONSUMER",
+    "BSDE": "PROPERTY", "CTRA": "PROPERTY", "SMRA": "PROPERTY", "PWON": "PROPERTY",
+    "ASRI": "PROPERTY", "DILD": "PROPERTY", "PANI": "PROPERTY", "APLN": "PROPERTY",
+    "LPCK": "PROPERTY", "LPKR": "PROPERTY", "BEST": "PROPERTY", "DMAS": "PROPERTY",
+    "GOTO": "TECH", "BUKA": "TECH", "EMTK": "TECH", "SCMA": "TECH", "WIRG": "TECH",
+    "DCII": "TECH", "MTDL": "TECH",
+    "ASSA": "TRANS", "BIRD": "TRANS", "SMDR": "TRANS", "TMAS": "TRANS",
+    "GIAA": "TRANS", "IATA": "TRANS",
+    "AALI": "PLANTATION", "LSIP": "PLANTATION", "SIMP": "PLANTATION", "SMAR": "PLANTATION",
+    "DSNG": "PLANTATION", "TAPG": "PLANTATION", "SGRO": "PLANTATION",
+    "UNTR": "HEAVY-EQP", "PTRO": "HEAVY-EQP",
+}
+
+FALLBACK_UNIVERSE = sorted(set(list(MASTER_AFILIASI) + list(SECTOR_MAP)))
+
+# =====================================================================
+# PENGAMBILAN DATA
+# =====================================================================
+@st.cache_data(ttl=86400, show_spinner=False)
+def ambil_universe():
+    """Daftar emiten IDX dari screener TradingView. Gagal -> daftar bawaan."""
+    if not ADA_REQ:
+        return FALLBACK_UNIVERSE, "bawaan"
+    try:
+        body = {"filter": [{"left": "type", "operation": "equal", "right": "stock"}],
+                "columns": ["name", "sector"], "range": [0, 1200],
+                "sort": {"sortBy": "name", "sortOrder": "asc"}}
+        r = requests.post("https://scanner.tradingview.com/indonesia/scan",
+                          json=body, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+        rows = r.json().get("data", [])
+        tics, sect = [], {}
+        for d in rows:
+            kode = d["d"][0]
+            if kode and kode.isalpha() and 3 <= len(kode) <= 5:
+                tics.append(kode)
+                if d["d"][1]:
+                    sect.setdefault(kode, d["d"][1])
+        if len(tics) > 200:
+            for k, v in sect.items():
+                SECTOR_MAP.setdefault(k, v)
+            return sorted(set(tics)), "TradingView"
+    except Exception:
+        pass
+    return FALLBACK_UNIVERSE, "bawaan"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ambil_harga(tickers, periode="1y", batch=80):
+    """Unduh bar harian secara batch."""
+    keluar = {}
+    for i in range(0, len(tickers), batch):
+        chunk = [f"{t}.JK" for t in tickers[i:i + batch]]
+        try:
+            df = yf.download(chunk, period=periode, interval="1d", progress=False,
+                             auto_adjust=False, group_by="ticker", threads=True)
+        except Exception:
+            continue
+        for sym in chunk:
+            kode = sym[:-3]
+            try:
+                sub = df[sym] if isinstance(df.columns, pd.MultiIndex) else df
+                sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                if len(sub) >= 60:
+                    keluar[kode] = sub
+            except Exception:
+                continue
+    return keluar
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ambil_makro():
+    out = {}
+    peta = {"^JKSE": "IHSG", "IDR=X": "USDIDR", "CL=F": "MINYAK",
+            "GC=F": "EMAS", "HG=F": "TEMBAGA", "^IXIC": "NASDAQ"}
+    try:
+        df = yf.download(list(peta), period="1mo", interval="1d", progress=False,
+                         auto_adjust=False, group_by="ticker", threads=True)
+        for sym, nama in peta.items():
+            try:
+                s = (df[sym]["Close"] if isinstance(df.columns, pd.MultiIndex)
+                     else df["Close"]).dropna()
+                if len(s) >= 2:
+                    out[nama] = {"val": float(s.iloc[-1]),
+                                 "chg": float(s.iloc[-1] / s.iloc[-2] - 1) * 100}
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+# =====================================================================
+# MESIN TURTLE
+# =====================================================================
+def hitung_N(df, periode=20):
+    """N = Wilder smoothing 20 hari dari True Range. Rumus asli Turtle."""
+    h, l, c = df["High"], df["Low"], df["Close"]
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (pc - l).abs()], axis=1).max(axis=1)
+    seed = tr.rolling(periode).mean()
+    v = np.array(seed.values, dtype=float, copy=True)
+    t = np.array(tr.values, dtype=float, copy=True)
+    for i in range(periode + 1, len(v)):
+        if not np.isnan(v[i - 1]):
+            v[i] = (v[i - 1] * (periode - 1) + t[i]) / periode
+    return v[-1]
+
+
+def metrik(kode, df, p_masuk, p_keluar):
+    if len(df) < p_masuk + 25:
+        return None
+    C = df["Close"].values.astype(float)
+    V = df["Volume"].values.astype(float)
+    n = hitung_N(df, 20)
+    if not np.isfinite(n) or n <= 0:
+        return None
+    tinggi = float(df["High"].shift(1).rolling(p_masuk).max().iloc[-1])
+    rendah = float(df["Low"].shift(1).rolling(p_keluar).min().iloc[-1])
+    volrata = float(np.mean(V[-21:-1])) or 1.0
+    tv = (C * V)[-20:]
+    return dict(
+        kode=kode, harga=float(C[-1]), N=float(n),
+        tinggi20=tinggi, rendah10=rendah,
+        vol_rasio=float(V[-1] / volrata),
+        turn_min20=float(np.min(tv)), turn_med=float(np.median(tv)),
+        tembus=bool(C[-1] > tinggi),
+        jarak=float(C[-1] / tinggi - 1) if tinggi else np.nan,
+        grup=MASTER_AFILIASI.get(kode, "-"),
+        sektor=SECTOR_MAP.get(kode, "-"),
+        tanggal=df.index[-1].strftime("%d %b %Y"),
+    )
+
+
+def ukuran_unit(ekuitas, N, risiko):
+    """1 Unit = (risiko% x ekuitas) / N, dibulatkan ke bawah per lot."""
+    if N <= 0 or ekuitas <= 0:
+        return 0
+    return int(((ekuitas * risiko) / N) // 100)
+
+
+# =====================================================================
+# SIDEBAR
+# =====================================================================
+st.sidebar.markdown("### EKUITAS")
+ekuitas = st.sidebar.number_input(
+    "Ekuitas OBERLIN (Rp)", min_value=0, max_value=10_000_000_000,
+    value=58_233_835, step=100_000,
+    help="Dipakai untuk menghitung ukuran Unit. Perbarui setiap ada transaksi match.")
+kas = st.sidebar.number_input(
+    "Kas bebas OBERLIN (Rp)", min_value=0, max_value=10_000_000_000,
+    value=28_773_603, step=100_000,
+    help="Batas keras: nilai 1 unit tidak boleh melebihi kas.")
+
+st.sidebar.markdown("### ATURAN TURTLE")
+risiko = st.sidebar.select_slider("Risiko per Unit (% ekuitas)",
+                                  options=[0.5, 0.75, 1.0, 1.25, 1.5], value=1.0) / 100
+p_masuk = st.sidebar.number_input("Periode tembus (masuk)", 5, 60, 20)
+p_keluar = st.sidebar.number_input("Periode keluar", 3, 30, 10)
+maks_unit = st.sidebar.number_input("Maks unit per saham", 1, 12, 4)
+
+st.sidebar.markdown("### SARINGAN IDX")
+st.sidebar.caption("Dua saringan di bawah TIDAK ada di aturan Turtle. Wajib untuk IDX tanpa margin.")
+amb_likuid = st.sidebar.selectbox(
+    "Transaksi harian minimal", [0, 1e9, 2e9, 5e9, 1e10],
+    index=3, format_func=lambda v: "Tanpa batas" if v == 0 else f"Rp {v/1e9:.0f} miliar")
+harga_min = st.sidebar.number_input("Harga minimal", 0, 100000, 50, 50)
+
+st.sidebar.markdown("### SEMESTA")
+mode_universe = st.sidebar.radio("Cakupan", ["Semua IDX", "Grup terpantau saja"], index=0,
+                                 help="Semua IDX: putaran pertama 2-4 menit, lalu di-cache 15 menit.")
+
+# =====================================================================
+# HALAMAN
+# =====================================================================
+st.markdown('<div class="header-container"><div class="header-title">TURTLE BOARD</div>'
+            '<div class="header-sub">DONCHIAN 20 HARI &nbsp;·&nbsp; UKURAN UNIT BERBASIS N '
+            '&nbsp;·&nbsp; STOP 2N &nbsp;·&nbsp; KELUAR 10 HARI</div></div>',
+            unsafe_allow_html=True)
+
+makro = ambil_makro()
+if makro:
+    html = "<div class='macro-strip'>"
+    for k, v in makro.items():
+        cls = "macro-val-up" if v["chg"] >= 0 else "macro-val-down"
+        panah = "&#9650;" if v["chg"] >= 0 else "&#9660;"
+        html += (f"<div class='macro-item'><span class='macro-label'>{k}</span>"
+                 f"<span class='{cls}'>{v['val']:,.2f} ({panah} {v['chg']:.2f}%)</span></div>")
+    st.markdown(html + "</div>", unsafe_allow_html=True)
+
+st.markdown(f"""<div class="aturan">
+<b>Risiko 1 unit:</b> Rp {ekuitas*risiko*2:,.0f} &nbsp;(= 2N x {risiko*100:.2f}% ekuitas)
+&nbsp;·&nbsp; <b>Kas bebas:</b> Rp {kas:,.0f}
+&nbsp;·&nbsp; <b>Batas:</b> {maks_unit} unit/saham · 6 unit/grup · 10 unit/sektor · 12 unit total<br>
+Tidak ada take profit. Tidak ada target. Tidak ada skor. Keluar hanya lewat terendah
+{p_keluar} hari atau stop 2N.
+</div>""".replace(",", "."), unsafe_allow_html=True)
+
+if "hasil" not in st.session_state:
+    st.session_state.hasil = None
+    st.session_state.info = None
+
+if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
+    with st.spinner("Menarik daftar emiten..."):
+        universe, sumber = ambil_universe()
+    if mode_universe == "Grup terpantau saja":
+        universe = sorted(set(FALLBACK_UNIVERSE) & set(universe)) or FALLBACK_UNIVERSE
+    with st.spinner(f"Menarik bar harian {len(universe)} emiten (putaran pertama 2-4 menit)..."):
+        harga = ambil_harga(tuple(universe))
+
+    baris = []
+    for kode, df in harga.items():
+        try:
+            m = metrik(kode, df, int(p_masuk), int(p_keluar))
+            if m:
+                baris.append(m)
+        except Exception:
+            continue
+
+    d = pd.DataFrame(baris)
+    if not d.empty:
+        d = d[(d["turn_min20"] >= amb_likuid) & (d["harga"] >= harga_min)]
+        d["unit_lot"] = d["N"].apply(lambda n: ukuran_unit(ekuitas, n, risiko))
+        d["nilai_unit"] = d["unit_lot"] * 100 * d["harga"]
+        d["sl_2n"] = d["harga"] - 2 * d["N"]
+        d["rugi_unit"] = d["unit_lot"] * 100 * 2 * d["N"]
+        d["pct_kas"] = d["nilai_unit"] / kas * 100 if kas else np.nan
+        d["muat"] = np.where(d["nilai_unit"] <= kas, "YA", "TIDAK")
+    st.session_state.hasil = d
+    st.session_state.info = (sumber, len(harga), len(d) if not d.empty else 0)
+
+d = st.session_state.hasil
+
+if d is None:
+    st.markdown('<div class="kosong"><div class="kosong-judul">BELUM DIPINDAI</div>'
+                '<div class="kosong-sub">Tekan tombol di atas untuk memindai bursa.</div></div>',
+                unsafe_allow_html=True)
+    st.stop()
+
+if d.empty:
+    st.markdown('<div class="kosong"><div class="kosong-judul">TIDAK ADA DATA</div>'
+                '<div class="kosong-sub">Saringan likuiditas mungkin terlalu ketat.</div></div>',
+                unsafe_allow_html=True)
+    st.stop()
+
+sumber, n_hitung, n_lolos = st.session_state.info
+st.markdown(f"<div style='text-align:center;color:#5a666e;font-family:JetBrains Mono;"
+            f"font-size:10px;letter-spacing:2px;margin-bottom:12px'>"
+            f"{n_hitung} EMITEN DIHITUNG ({sumber}) &nbsp;·&nbsp; {n_lolos} LOLOS SARINGAN "
+            f"&nbsp;·&nbsp; DATA {d['tanggal'].iloc[0]} &nbsp;·&nbsp; "
+            f"{datetime.now(WIB).strftime('%d %b %Y %H:%M WIB')}</div>",
+            unsafe_allow_html=True)
+
+KOLOM = {"kode": "KODE", "harga": "HARGA", "N": "N", "tinggi20": f"TERTINGGI {p_masuk}H",
+         "jarak": "JARAK", "vol_rasio": "VOL", "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT",
+         "sl_2n": "SL 2N", "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
+         "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS", "grup": "GRUP", "sektor": "SEKTOR"}
+URUT = list(KOLOM)
+
+KONF = {
+    "HARGA": st.column_config.NumberColumn(format="%.0f"),
+    "N": st.column_config.NumberColumn(format="%.2f", help="Rata-rata gerak harian 20 hari"),
+    "JARAK": st.column_config.NumberColumn(format="%.2f%%", help="Jarak harga ke level tembus"),
+    "VOL": st.column_config.NumberColumn(format="%.2fx", help="Volume hari ini / rata-rata 20 hari"),
+    "1 UNIT": st.column_config.NumberColumn(format="%d lot"),
+    "NILAI UNIT": st.column_config.NumberColumn(format="%.0f"),
+    "SL 2N": st.column_config.NumberColumn(format="%.1f"),
+    "RUGI 1 UNIT": st.column_config.NumberColumn(format="%.0f"),
+    "% KAS": st.column_config.NumberColumn(format="%.1f%%"),
+}
+
+
+def tampil(sub):
+    t = sub[URUT].rename(columns=KOLOM).copy()
+    t["JARAK"] = t["JARAK"] * 100
+    return t
+
+
+sinyal = d[d["tembus"]].sort_values("nilai_unit", ascending=False)
+dekat = d[(~d["tembus"]) & (d["jarak"] >= -0.05)].sort_values("jarak", ascending=False)
+
+st.markdown(f"<h3 style='font-family:Orbitron;color:#00ffcc;font-size:16px;letter-spacing:2px'>"
+            f"SINYAL MASUK &nbsp;—&nbsp; {len(sinyal)} SAHAM</h3>", unsafe_allow_html=True)
+
+if sinyal.empty:
+    st.markdown(f'<div class="kosong"><div class="kosong-judul">TIDAK ADA SINYAL</div>'
+                f'<div class="kosong-sub">Tidak ada saham yang menembus tertinggi {p_masuk} hari '
+                f'hari ini.<br>Ini keadaan normal — sebagian besar hari memang begitu.<br>'
+                f'Catat tanggal ini di jurnal dengan keterangan "tidak ada sinyal".</div></div>',
+                unsafe_allow_html=True)
+else:
+    st.dataframe(tampil(sinyal), use_container_width=True, hide_index=True,
+                 column_config=KONF, height=min(60 + 35 * len(sinyal), 420))
+    muat = sinyal[sinyal["muat"] == "YA"]
+    st.caption(f"{len(muat)} dari {len(sinyal)} muat di kas Rp{kas:,.0f}".replace(",", ".") +
+               " · sisanya nilai 1 unit-nya melebihi kas bebas.")
+
+st.markdown(f"<h3 style='font-family:Orbitron;color:#3d7fff;font-size:16px;letter-spacing:2px;"
+            f"margin-top:22px'>MENDEKATI TEMBUS &nbsp;—&nbsp; {len(dekat)} SAHAM</h3>",
+            unsafe_allow_html=True)
+st.caption("Belum sinyal. Jangan dibeli. Hanya untuk kamu tahu apa yang mungkin muncul besok.")
+if dekat.empty:
+    st.info("Tidak ada yang dalam jarak 5% dari level tembus.")
+else:
+    st.dataframe(tampil(dekat), use_container_width=True, hide_index=True,
+                 column_config=KONF, height=min(60 + 35 * len(dekat), 380))
+
+st.markdown("""<div class="catatan">
+<b>Aplikasi ini tidak tahu apa yang sudah kamu pegang.</b> Saham yang sudah tembus akan terus
+muncul selama harganya masih di atas level itu — bisa berhari-hari. Cocokkan dulu dengan sheet
+OBERLIN di jurnal sebelum membeli, supaya tidak membeli nama yang sama dua kali. Penambahan
+unit hanya sah di kelipatan 0,5N di atas harga masuk pertama, bukan setiap kali sinyal masih menyala.
+</div>""", unsafe_allow_html=True)
+
+st.download_button("Unduh hasil pindai (CSV)",
+                   d[URUT].rename(columns=KOLOM).to_csv(index=False).encode(),
+                   f"turtle_{datetime.now(WIB).strftime('%Y%m%d')}.csv", "text/csv")
+
+st.caption("Data Yahoo Finance, tertunda 10-15 menit · N dihitung dengan Wilder 20 hari "
+           "sesuai rumus asli Turtle · bukan rekomendasi investasi")
+
