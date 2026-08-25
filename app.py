@@ -491,6 +491,7 @@ if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
         d["mcap"] = d["kode"].map(mcap).fillna(0)
         d["ff"] = d["kode"].map(ff)
         d["bobot"] = d["rp1pct"].apply(label_bobot)
+        d["rp1pct_m"] = d["rp1pct"] / 1e9
         d = d[(d["turn_min20"] >= amb_likuid) & (d["harga"] >= harga_min)]
         d["unit_lot"] = d["N"].apply(lambda n: ukuran_unit(ekuitas, n, risiko))
         d["nilai_unit"] = d["unit_lot"] * 100 * d["harga"]
@@ -534,7 +535,7 @@ KOLOM = {"kode": "KODE", "kesegaran": "KESEGARAN", "hari_sejak": "TEMBUS",
          "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT", "sl_2n": "SL 2N",
          "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
          "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS",
-         "bobot": "BOBOT", "rp1pct": "Rp/1%", "ff": "FF%",
+         "bobot": "BOBOT", "rp1pct_m": "Rp/1%", "ff": "FF%",
          "grup": "GRUP", "sektor": "SEKTOR"}
 URUT = list(KOLOM)
 
@@ -547,8 +548,9 @@ KONF = {
     "BOBOT": st.column_config.TextColumn(
         help="RINGAN < Rp10 M · SEDANG Rp10-50 M · BERAT Rp50-200 M · SANGAT BERAT > Rp200 M"),
     "Rp/1%": st.column_config.NumberColumn(
-        format="%.0f", help="Rupiah transaksi yang dibutuhkan untuk menggerakkan harga 1% "
-                            "(Amihud, median 60 hari). Berlaku dua arah: naik maupun turun."),
+        format="%.2f M", help="Miliar rupiah transaksi yang dibutuhkan untuk menggerakkan "
+                              "harga 1% (Amihud, median 60 hari). Berlaku dua arah: naik "
+                              "maupun turun. Pembanding: BBCA 643 M, PACK 8 M."),
     "FF%": st.column_config.NumberColumn(format="%.0f%%", help="Persentase saham beredar bebas"),
     "HARGA": st.column_config.NumberColumn(format="%.0f"),
     "N": st.column_config.NumberColumn(format="%.2f", help="Rata-rata gerak harian 20 hari"),
@@ -610,7 +612,7 @@ def kartu(sub, kas_bebas):
     rugi 1 unit <b>Rp{rp(r['rugi_unit'])}</b> &middot;
     keluar10H <b>{rp(r['rendah10'])}</b><br>
     Bobot <b>{r.get('bobot', '?')}</b> &middot; gerak 1% butuh
-    <b>Rp{rp(r['rp1pct']) if np.isfinite(r.get('rp1pct', np.nan)) else '-'}</b><br>
+    <b>{f"Rp{r['rp1pct']/1e9:.2f} M" if np.isfinite(r.get('rp1pct', np.nan)) else '-'}</b><br>
     <span style="color:#7c8a94">{r['grup']} &middot; {r['sektor']}</span>
   </div>
 </div>""")
