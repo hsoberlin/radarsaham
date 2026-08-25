@@ -55,7 +55,32 @@ st.markdown("""
 .header-sub{font-family:'JetBrains Mono';font-size:10px;color:#7c8a94;letter-spacing:2px;margin-top:4px}
 .macro-strip{display:flex;justify-content:space-around;background:#0a0e14;padding:9px;
   border-radius:5px;border:1px solid #333;margin-bottom:14px;flex-wrap:wrap;gap:6px}
-.macro-item{font-family:'JetBrains Mono';font-size:12px;text-align:center}
+.macro-item{font-family:'JetBrains Mono';font-size:12px;text-align:center;
+  padding:6px 10px;border-radius:6px;border:1px solid transparent;min-width:104px}
+.macro-up{background:rgba(0,255,204,.09);border-color:rgba(0,255,204,.35)}
+.macro-down{background:rgba(255,92,92,.09);border-color:rgba(255,92,92,.35)}
+.macro-utama{min-width:150px;padding:6px 14px}
+.macro-utama .macro-label{font-size:11px!important;letter-spacing:2px}
+.macro-utama .macro-val-up,.macro-utama .macro-val-down{font-size:17px}
+/* --- kartu tampilan HP --- */
+.kartu{background:#0a0e14;border:1px solid #2a3038;border-radius:8px;
+  padding:11px 13px;margin-bottom:9px}
+.kartu-segar{border-left:4px solid #00ffcc}
+.kartu-ok{border-left:4px solid #3d7fff}
+.kartu-tinggal{border-left:4px solid #ffb400}
+.kartu-kepala{display:flex;justify-content:space-between;align-items:baseline;
+  margin-bottom:7px;flex-wrap:wrap;gap:4px}
+.kartu-kode{font-family:'Orbitron';font-size:17px;font-weight:900;color:#fff;letter-spacing:1px}
+.kartu-tag{font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;
+  padding:2px 8px;border-radius:10px}
+.tag-segar{background:rgba(0,255,204,.15);color:#00ffcc}
+.tag-ok{background:rgba(61,127,255,.15);color:#7fa8ff}
+.tag-tinggal{background:rgba(255,180,0,.15);color:#ffc94d}
+.kartu-baris{font-family:'JetBrains Mono';font-size:11.5px;color:#c3ced6;
+  line-height:1.85;border-top:1px solid #1c2229;padding-top:5px}
+.kartu-baris b{color:#fff}
+.kartu-unit{color:#00ffcc!important;font-weight:800}
+.kartu-sl{color:#ff8f8f!important;font-weight:800}
 .macro-label{font-size:9px;color:#888;display:block;margin-bottom:2px;letter-spacing:1px}
 .macro-val-up{color:#00ffcc;font-weight:bold}
 .macro-val-down{color:#ff6b6b;font-weight:bold}
@@ -76,6 +101,10 @@ st.markdown("""
 section[data-testid="stSidebar"]{background:#060a0f;border-right:1px solid #222}
 /* --- keterbacaan: paksa teks terang di seluruh komponen --- */
 .stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div{color:#e8edf0}
+/* warna makro TIDAK boleh ditimpa aturan keterbacaan di atas */
+.macro-val-up, .stApp .macro-val-up, .stApp div.macro-val-up{color:#00ffcc!important}
+.macro-val-down, .stApp .macro-val-down, .stApp div.macro-val-down{color:#ff5c5c!important}
+.macro-label, .stApp .macro-label{color:#8b98a3!important}
 [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p{color:#9fb0bb!important}
 [data-testid="stMarkdownContainer"] p{color:#e8edf0}
 .stAlert, .stAlert p{color:#e8edf0!important}
@@ -346,6 +375,10 @@ amb_likuid = st.sidebar.selectbox(
     index=3, format_func=lambda v: "Tanpa batas" if v == 0 else f"Rp {v/1e9:.0f} miliar")
 harga_min = st.sidebar.number_input("Harga minimal", 0, 100000, 50, 50)
 
+st.sidebar.markdown("### TAMPILAN")
+mode_tampil = st.sidebar.radio("Bentuk hasil", ["Tabel (layar lebar)", "Kartu (HP)"], index=0,
+                               help="Kartu: semua angka muat dalam satu tangkapan layar tegak.")
+
 st.sidebar.markdown("### SEMESTA")
 mode_universe = st.sidebar.radio("Cakupan", ["Semua IDX", "Grup terpantau saja"], index=0,
                                  help="Semua IDX: putaran pertama 2-4 menit, lalu di-cache 15 menit.")
@@ -360,12 +393,20 @@ st.markdown('<div class="header-container"><div class="header-title">TURTLE BOAR
 
 makro = ambil_makro()
 if makro:
+    urut = ["IHSG"] + [k for k in makro if k != "IHSG"]
     html = "<div class='macro-strip'>"
-    for k, v in makro.items():
-        cls = "macro-val-up" if v["chg"] >= 0 else "macro-val-down"
-        panah = "&#9650;" if v["chg"] >= 0 else "&#9660;"
-        html += (f"<div class='macro-item'><span class='macro-label'>{k}</span>"
-                 f"<span class='{cls}'>{v['val']:,.2f} ({panah} {v['chg']:.2f}%)</span></div>")
+    for k in urut:
+        v = makro.get(k)
+        if not v:
+            continue
+        naik = v["chg"] >= 0
+        cls_teks = "macro-val-up" if naik else "macro-val-down"
+        cls_kotak = "macro-up" if naik else "macro-down"
+        utama = " macro-utama" if k == "IHSG" else ""
+        panah = "&#9650;" if naik else "&#9660;"
+        html += (f"<div class='macro-item {cls_kotak}{utama}'>"
+                 f"<span class='macro-label'>{k}</span>"
+                 f"<span class='{cls_teks}'>{v['val']:,.2f} {panah} {abs(v['chg']):.2f}%</span></div>")
     st.markdown(html + "</div>", unsafe_allow_html=True)
 
 st.markdown(f"""<div class="aturan">
@@ -471,6 +512,50 @@ def tampil(sub):
     return t
 
 
+def tampil_ringkas(sub):
+    """Tabel untuk daftar yang belum tembus: tiga kolom kesegaran dilepas."""
+    t = tampil(sub)
+    return t.drop(columns=["KESEGARAN", "TEMBUS", "LARI SEJAK"])
+
+
+def kartu(sub, kas_bebas):
+    """Satu blok per saham — muat dalam satu tangkapan layar HP."""
+    gaya = {"SEGAR": ("kartu-segar", "tag-segar"),
+            "MASIH OK": ("kartu-ok", "tag-ok"),
+            "TERTINGGAL": ("kartu-tinggal", "tag-tinggal"),
+            "-": ("", "tag-ok")}
+    rp = lambda v: f"{v:,.0f}".replace(",", ".")
+    blok = []
+    for _, r in sub.iterrows():
+        kb, kt = gaya.get(r["kesegaran"], ("", "tag-ok"))
+        if pd.isna(r["hari_sejak"]):
+            kapan = "belum tembus"
+        elif r["hari_sejak"] == 0:
+            kapan = "tembus hari ini"
+        else:
+            kapan = f"tembus {int(r['hari_sejak'])} hari lalu &middot; lari +{r['lari']*100:.1f}%"
+        muat = ("" if r["muat"] == "YA"
+                else " <span style='color:#ff8f8f'>&middot; TIDAK MUAT KAS</span>")
+        blok.append(f"""<div class="kartu {kb}">
+  <div class="kartu-kepala">
+    <span class="kartu-kode">{r['kode']}</span>
+    <span class="kartu-tag {kt}">{'' if r['kesegaran'] == '-' else r['kesegaran']} &nbsp;{kapan}</span>
+  </div>
+  <div class="kartu-baris">
+    Harga <b>{rp(r['harga'])}</b> &middot; N <b>{r['N']:.2f}</b> &middot;
+    tertinggi20 <b>{rp(r['tinggi20'])}</b> ({r['jarak']*100:+.2f}%) &middot;
+    vol <b>{r['vol_rasio']:.2f}x</b><br>
+    <span class="kartu-unit">1 unit {int(r['unit_lot'])} lot = Rp{rp(r['nilai_unit'])}</span>
+    ({r['pct_kas']:.1f}% kas){muat}<br>
+    <span class="kartu-sl">SL 2N {r['sl_2n']:.1f}</span> &middot;
+    rugi 1 unit <b>Rp{rp(r['rugi_unit'])}</b> &middot;
+    keluar10H <b>{rp(r['rendah10'])}</b><br>
+    <span style="color:#7c8a94">{r['grup']} &middot; {r['sektor']}</span>
+  </div>
+</div>""")
+    return "".join(blok)
+
+
 urut_segar = {"SEGAR": 0, "MASIH OK": 1, "TERTINGGAL": 2}
 sinyal = d[d["tembus"]].copy()
 if not sinyal.empty:
@@ -488,8 +573,11 @@ if sinyal.empty:
                 f'Catat tanggal ini di jurnal dengan keterangan "tidak ada sinyal".</div></div>',
                 unsafe_allow_html=True)
 else:
-    st.dataframe(tampil(sinyal), use_container_width=True, hide_index=True,
-                 column_config=KONF, height=min(60 + 35 * len(sinyal), 420))
+    if mode_tampil.startswith("Kartu"):
+        st.markdown(kartu(sinyal, kas), unsafe_allow_html=True)
+    else:
+        st.dataframe(tampil(sinyal), use_container_width=True, hide_index=True,
+                     column_config=KONF, height=min(60 + 35 * len(sinyal), 420))
     muat = sinyal[sinyal["muat"] == "YA"]
     n_segar = int((sinyal["kesegaran"] == "SEGAR").sum())
     n_tinggal = int((sinyal["kesegaran"] == "TERTINGGAL").sum())
@@ -510,8 +598,13 @@ st.caption("Belum sinyal. Jangan dibeli. Hanya untuk kamu tahu apa yang mungkin 
 if dekat.empty:
     st.info("Tidak ada yang dalam jarak 5% dari level tembus.")
 else:
-    st.dataframe(tampil(dekat), use_container_width=True, hide_index=True,
-                 column_config=KONF, height=min(60 + 35 * len(dekat), 380))
+    if mode_tampil.startswith("Kartu"):
+        st.markdown(kartu(dekat.head(12), kas), unsafe_allow_html=True)
+        if len(dekat) > 12:
+            st.caption(f"12 teratas dari {len(dekat)}. Unduh CSV untuk daftar penuh.")
+    else:
+        st.dataframe(tampil_ringkas(dekat), use_container_width=True, hide_index=True,
+                     column_config=KONF, height=min(60 + 35 * len(dekat), 380))
 
 st.markdown("""<div class="catatan">
 <b>Aplikasi ini tidak tahu apa yang sudah kamu pegang.</b> Saham yang sudah tembus akan terus
