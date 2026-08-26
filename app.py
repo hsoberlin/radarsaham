@@ -338,6 +338,7 @@ def metrik(kode, df, p_masuk, p_keluar):
         vol_rasio=float(V[-1] / volrata),
         rp1pct=rupiah_per_1persen(df),
         turn_min20=float(np.min(tv)), turn_med=float(np.median(tv)),
+        turn_med_m=float(np.median(tv)) / 1e9,
         tembus=bool(C[-1] > tinggi),
         hari_sejak=hari_sejak, lari=lari,
         jarak=float(C[-1] / tinggi - 1) if tinggi else np.nan,
@@ -347,8 +348,8 @@ def metrik(kode, df, p_masuk, p_keluar):
     )
 
 
-BOBOT_BATAS = [(200e9, "SANGAT BERAT"), (50e9, "BERAT"), (10e9, "SEDANG"), (0, "RINGAN")]
-BOBOT_PILIHAN = ["RINGAN", "SEDANG", "BERAT", "SANGAT BERAT", "?"]
+BOBOT_BATAS = [(200e9, "SANGAT TEBAL"), (50e9, "TEBAL"), (10e9, "SEDANG"), (0, "TIPIS")]
+BOBOT_PILIHAN = ["TIPIS", "SEDANG", "TEBAL", "SANGAT TEBAL", "?"]
 
 
 def rupiah_per_1persen(df, jendela=60, min_nilai=1e6):
@@ -369,13 +370,20 @@ def rupiah_per_1persen(df, jendela=60, min_nilai=1e6):
 
 
 def label_bobot(v):
-    """Seberapa mahal menggerakkan harga saham ini 1%."""
+    """Ukuran Amihud — perbandingan ketebalan antar saham.
+
+    PENTING: ini BUKAN biaya untuk menggerakkan harga. Angkanya median dari
+    hubungan gerak-harga dengan nilai transaksi, dan sebarannya lebar (AADI
+    berkisar 30-200 M dalam 60 hari yang sama). Lompatan pembukaan tidak
+    terukur sama sekali. Pakai untuk membandingkan saham, bukan sebagai
+    angka mutlak.
+    """
     if v is None or not np.isfinite(v) or v <= 0:
         return "?"
     for batas, nama in BOBOT_BATAS:
         if v >= batas:
             return nama
-    return "RINGAN"
+    return "TIPIS"
 
 
 def ukuran_unit(ekuitas, N, risiko):
@@ -389,14 +397,26 @@ def ukuran_unit(ekuitas, N, risiko):
 # SIDEBAR
 # =====================================================================
 st.sidebar.markdown("### EKUITAS")
-ekuitas = st.sidebar.number_input(
-    "Ekuitas OBERLIN (Rp)", min_value=0, max_value=10_000_000_000,
-    value=58_233_835, step=100_000,
-    help="Dipakai untuk menghitung ukuran Unit. Perbarui setiap ada transaksi match.")
-kas = st.sidebar.number_input(
-    "Kas bebas OBERLIN (Rp)", min_value=0, max_value=10_000_000_000,
-    value=28_773_603, step=100_000,
-    help="Batas keras: nilai 1 unit tidak boleh melebihi kas.")
+mode_rekam = st.sidebar.toggle(
+    "Mode rekam", value=False,
+    help="Untuk perekaman layar: ekuitas dan kas diganti angka contoh yang bulat. "
+         "Seluruh hitungan tetap benar, cuma modalnya bukan modalmu.")
+
+if mode_rekam:
+    ekuitas = st.sidebar.number_input("Ekuitas contoh (Rp)", 0, 10_000_000_000,
+                                      100_000_000, 10_000_000)
+    kas = st.sidebar.number_input("Kas contoh (Rp)", 0, 10_000_000_000,
+                                  50_000_000, 10_000_000)
+    st.sidebar.caption("Mode rekam menyala — angka di layar bukan modal sebenarnya.")
+else:
+    ekuitas = st.sidebar.number_input(
+        "Ekuitas (Rp)", min_value=0, max_value=10_000_000_000,
+        value=58_233_835, step=100_000,
+        help="Dipakai untuk menghitung ukuran Unit. Perbarui setiap ada transaksi match.")
+    kas = st.sidebar.number_input(
+        "Kas bebas (Rp)", min_value=0, max_value=10_000_000_000,
+        value=28_773_603, step=100_000,
+        help="Batas keras: nilai 1 unit tidak boleh melebihi kas.")
 
 st.sidebar.markdown("### ATURAN TURTLE")
 risiko = st.sidebar.select_slider("Risiko per Unit (% ekuitas)",
@@ -412,10 +432,10 @@ amb_likuid = st.sidebar.selectbox(
     index=3, format_func=lambda v: "Tanpa batas" if v == 0 else f"Rp {v/1e9:.0f} miliar")
 harga_min = st.sidebar.number_input("Harga minimal", 0, 100000, 50, 50)
 bobot_dipakai = st.sidebar.multiselect(
-    "Bobot pasar (Rp untuk gerak 1%)", BOBOT_PILIHAN, default=BOBOT_PILIHAN,
-    help="RINGAN < Rp10 M · SEDANG Rp10-50 M · BERAT Rp50-200 M · SANGAT BERAT > Rp200 M. "
-         "Makin ringan, makin sedikit uang yang dibutuhkan untuk menggerakkan harga 1% — "
-         "naik maupun turun. Pembanding: BBCA butuh Rp643 miliar, PACK cuma Rp8 miliar.")
+    "Ketebalan pasar", BOBOT_PILIHAN, default=BOBOT_PILIHAN,
+    help="Perbandingan antar saham, bukan angka mutlak. TIPIS = harga bergerak jauh dengan "
+         "transaksi sedikit, dua arah. Uji 2 tahun tidak menemukan pola yang bisa diandalkan "
+         "antara ketebalan dan hasil, jadi pakai sebagai konteks saja.")
 
 st.sidebar.markdown("### DAFTAR MENDEKATI TEMBUS")
 ambang_dekat = st.sidebar.slider("Jarak maksimal dari level tembus (%)", 1.0, 15.0, 5.0, 0.5,
@@ -458,6 +478,7 @@ if makro:
     st.markdown(html + "</div>", unsafe_allow_html=True)
 
 st.markdown(f"""<div class="aturan">
+{'<b>MODE REKAM</b> &nbsp;·&nbsp; angka di bawah adalah contoh, bukan modal sebenarnya<br>' if mode_rekam else ''}
 <b>Risiko 1 unit:</b> Rp {ekuitas*risiko*2:,.0f} &nbsp;(= 2N x {risiko*100:.2f}% ekuitas)
 &nbsp;·&nbsp; <b>Kas bebas:</b> Rp {kas:,.0f}
 &nbsp;·&nbsp; <b>Batas:</b> {maks_unit} unit/saham · 6 unit/grup · 10 unit/sektor · 12 unit total<br>
@@ -535,7 +556,7 @@ KOLOM = {"kode": "KODE", "kesegaran": "KESEGARAN", "hari_sejak": "TEMBUS",
          "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT", "sl_2n": "SL 2N",
          "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
          "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS",
-         "bobot": "BOBOT", "rp1pct_m": "Rp/1%", "ff": "FF%",
+         "turn_med_m": "TRANSAKSI/HARI", "ff": "FF%", "bobot": "TEBAL",
          "grup": "GRUP", "sektor": "SEKTOR"}
 URUT = list(KOLOM)
 
@@ -545,13 +566,15 @@ KONF = {
     "TEMBUS": st.column_config.TextColumn(help="Berapa hari lalu menembus tertinggi 20 hari"),
     "LARI SEJAK": st.column_config.NumberColumn(
         format="%.1f%%", help="Kenaikan harga sejak hari tembus. Makin besar, makin buruk entry-mu."),
-    "BOBOT": st.column_config.TextColumn(
-        help="RINGAN < Rp10 M · SEDANG Rp10-50 M · BERAT Rp50-200 M · SANGAT BERAT > Rp200 M"),
-    "Rp/1%": st.column_config.NumberColumn(
-        format="%.2f M", help="Miliar rupiah transaksi yang dibutuhkan untuk menggerakkan "
-                              "harga 1% (Amihud, median 60 hari). Berlaku dua arah: naik "
-                              "maupun turun. Pembanding: BBCA 643 M, PACK 8 M."),
-    "FF%": st.column_config.NumberColumn(format="%.0f%%", help="Persentase saham beredar bebas"),
+    "TRANSAKSI/HARI": st.column_config.NumberColumn(
+        format="%.2f M", help="Nilai transaksi harian, median 20 hari, dalam miliar rupiah."),
+    "FF%": st.column_config.NumberColumn(
+        format="%.0f%%", help="Persentase saham beredar bebas. Makin kecil, makin sedikit "
+                              "barang yang benar-benar bisa diperdagangkan."),
+    "TEBAL": st.column_config.TextColumn(
+        help="Ukuran Amihud: TIPIS < 10 M · SEDANG 10-50 M · TEBAL 50-200 M · "
+             "SANGAT TEBAL > 200 M. Ini perbandingan antar saham, BUKAN biaya yang "
+             "dibutuhkan untuk menggerakkan harga."),
     "HARGA": st.column_config.NumberColumn(format="%.0f"),
     "N": st.column_config.NumberColumn(format="%.2f", help="Rata-rata gerak harian 20 hari"),
     "JARAK": st.column_config.NumberColumn(format="%.2f%%", help="Jarak harga ke level tembus"),
@@ -611,8 +634,9 @@ def kartu(sub, kas_bebas):
     <span class="kartu-sl">SL 2N {r['sl_2n']:.1f}</span> &middot;
     rugi 1 unit <b>Rp{rp(r['rugi_unit'])}</b> &middot;
     keluar10H <b>{rp(r['rendah10'])}</b><br>
-    Bobot <b>{r.get('bobot', '?')}</b> &middot; gerak 1% butuh
-    <b>{f"Rp{r['rp1pct']/1e9:.2f} M" if np.isfinite(r.get('rp1pct', np.nan)) else '-'}</b><br>
+    Transaksi/hari <b>Rp{r.get('turn_med_m', 0):.2f} M</b> &middot;
+    free float <b>{f"{r['ff']:.0f}%" if r.get('ff') else '-'}</b> &middot;
+    <b>{r.get('bobot', '?')}</b><br>
     <span style="color:#7c8a94">{r['grup']} &middot; {r['sektor']}</span>
   </div>
 </div>""")
