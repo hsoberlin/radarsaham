@@ -1,27 +1,21 @@
 """
 TURTLE BOARD
 ============
-Pemindai Donchian + kalkulator ukuran Unit (N) untuk Bursa Efek Indonesia.
+Pemindai Donchian 20 hari + kalkulator ukuran Unit (N) untuk Bursa Efek Indonesia.
 
-Aturan asli Turtle System 1 (Dennis & Eckhardt), dengan parameter yang
-disesuaikan hasil uji IDX 29 Agustus 2026 (127 saham, 5 tahun):
+Aturan asli Turtle System 1 (Dennis & Eckhardt):
     N          = Wilder smoothing 20 hari dari True Range
     1 Unit     = (risiko% x ekuitas) / N, dibulatkan ke bawah per lot
-    Masuk      = penutupan menembus tertinggi N hari sebelumnya (default 70)
-    Stop Loss  = harga masuk - stop_N x N   (default 3N, diuji lebih tahan
-                 banting untuk IDX dibanding 2N asli buku)
+    Masuk      = penutupan menembus tertinggi 20 hari sebelumnya
+    Stop Loss  = harga masuk - 2N   (rugi 1 unit = 2 x risiko%)
     Tambah     = tiap naik 0,5N, maksimum 4 unit per saham
-    Keluar     = penutupan di bawah terendah M hari sebelumnya (default 25)
+    Keluar     = penutupan di bawah terendah 10 hari sebelumnya
     Batas      = 4 per saham, 6 grup berkorelasi, 10 sektor, 12 satu arah
     TIDAK ADA take profit. TIDAK ADA batas waktu tahan. TIDAK ADA skor.
 
 Dua tambahan di luar buku, wajib untuk IDX tanpa margin:
     - saringan likuiditas (transaksi harian TERKECIL 20 hari)
     - batas kas (nilai posisi tidak boleh melebihi kas)
-
-Catatan: filter "skip setelah menang" TIDAK diimplementasikan di sini secara
-sengaja — keputusan re-entry setelah sinyal muncul lagi pasca-jual dibiarkan
-manual, dinilai di analisa terpisah dengan konteks jurnal, bukan otomatis.
 
 Jalankan:  streamlit run turtle_board.py
 Kebutuhan: streamlit yfinance pandas numpy requests
@@ -427,19 +421,8 @@ else:
 st.sidebar.markdown("### ATURAN TURTLE")
 risiko = st.sidebar.select_slider("Risiko per Unit (% ekuitas)",
                                   options=[0.5, 0.75, 1.0, 1.25, 1.5], value=1.0) / 100
-p_masuk = st.sidebar.number_input(
-    "Periode tembus (masuk)", 5, 120, 70,
-    help="Default 70 hari — hasil uji 5 tahun IDX 29 Agt 2026: breakout 20 hari "
-         "terlalu sering palsu di IHSG, 70 hari jarang tapi biasanya tren betulan.")
-p_keluar = st.sidebar.number_input(
-    "Periode keluar", 3, 60, 25,
-    help="Default 25 hari, mengikuti hasil uji yang sama (pasangan 70/25).")
-stop_n = st.sidebar.select_slider(
-    "Stop rugi (x N di bawah harga masuk)",
-    options=[1.5, 2.0, 2.5, 3.0, 3.5, 4.0], value=3.0,
-    help="Default 3N — uji 5 tahun menunjukkan 3N lebih baik dari 2N asli buku "
-         "di SEMUA kombinasi periode untuk IDX; saham IDX lebih liar dari futures, "
-         "2N terlalu ketat.")
+p_masuk = st.sidebar.number_input("Periode tembus (masuk)", 5, 60, 20)
+p_keluar = st.sidebar.number_input("Periode keluar", 3, 30, 10)
 maks_unit = st.sidebar.number_input("Maks unit per saham", 1, 12, 4)
 
 st.sidebar.markdown("### SARINGAN IDX")
@@ -471,9 +454,9 @@ mode_universe = st.sidebar.radio("Cakupan", ["Semua IDX", "Grup terpantau saja"]
 # =====================================================================
 # HALAMAN
 # =====================================================================
-st.markdown(f'<div class="header-container"><div class="header-title">TURTLE BOARD</div>'
-            f'<div class="header-sub">DONCHIAN {p_masuk} HARI &nbsp;·&nbsp; UKURAN UNIT BERBASIS N '
-            f'&nbsp;·&nbsp; STOP {stop_n:g}N &nbsp;·&nbsp; KELUAR {p_keluar} HARI</div></div>',
+st.markdown('<div class="header-container"><div class="header-title">TURTLE BOARD</div>'
+            '<div class="header-sub">DONCHIAN 20 HARI &nbsp;·&nbsp; UKURAN UNIT BERBASIS N '
+            '&nbsp;·&nbsp; STOP 2N &nbsp;·&nbsp; KELUAR 10 HARI</div></div>',
             unsafe_allow_html=True)
 
 makro = ambil_makro()
@@ -496,11 +479,11 @@ if makro:
 
 st.markdown(f"""<div class="aturan">
 {'<b>MODE REKAM</b> &nbsp;·&nbsp; angka di bawah adalah contoh, bukan modal sebenarnya<br>' if mode_rekam else ''}
-<b>Risiko 1 unit:</b> Rp {ekuitas*risiko*stop_n:,.0f} &nbsp;(= {stop_n:g}N x {risiko*100:.2f}% ekuitas)
+<b>Risiko 1 unit:</b> Rp {ekuitas*risiko*2:,.0f} &nbsp;(= 2N x {risiko*100:.2f}% ekuitas)
 &nbsp;·&nbsp; <b>Kas bebas:</b> Rp {kas:,.0f}
 &nbsp;·&nbsp; <b>Batas:</b> {maks_unit} unit/saham · 6 unit/grup · 10 unit/sektor · 12 unit total<br>
 Tidak ada take profit. Tidak ada target. Tidak ada skor. Keluar hanya lewat terendah
-{p_keluar} hari atau stop {stop_n:g}N.
+{p_keluar} hari atau stop 2N.
 </div>""".replace(",", "."), unsafe_allow_html=True)
 
 if "hasil" not in st.session_state:
@@ -533,8 +516,8 @@ if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
         d = d[(d["turn_min20"] >= amb_likuid) & (d["harga"] >= harga_min)]
         d["unit_lot"] = d["N"].apply(lambda n: ukuran_unit(ekuitas, n, risiko))
         d["nilai_unit"] = d["unit_lot"] * 100 * d["harga"]
-        d["sl_2n"] = d["harga"] - stop_n * d["N"]
-        d["rugi_unit"] = d["unit_lot"] * 100 * stop_n * d["N"]
+        d["sl_2n"] = d["harga"] - 2 * d["N"]
+        d["rugi_unit"] = d["unit_lot"] * 100 * 2 * d["N"]
         d["pct_kas"] = d["nilai_unit"] / kas * 100 if kas else np.nan
         d["muat"] = np.where(d["nilai_unit"] <= kas, "YA", "TIDAK")
         d["kesegaran"] = np.where(
@@ -570,7 +553,7 @@ st.markdown(f"<div style='text-align:center;color:#5a666e;font-family:JetBrains 
 KOLOM = {"kode": "KODE", "kesegaran": "KESEGARAN", "hari_sejak": "TEMBUS",
          "lari": "LARI SEJAK", "harga": "HARGA", "N": "N",
          "tinggi20": f"TERTINGGI {p_masuk}H", "jarak": "JARAK", "vol_rasio": "VOL",
-         "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT", "sl_2n": f"SL {stop_n:g}N",
+         "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT", "sl_2n": "SL 2N",
          "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
          "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS",
          "turn_med_m": "TRANSAKSI/HARI", "ff": "FF%", "bobot": "TEBAL",
@@ -580,7 +563,7 @@ URUT = list(KOLOM)
 KONF = {
     "KESEGARAN": st.column_config.TextColumn(
         help="SEGAR = tembus hari ini. TERTINGGAL = sudah lari jauh sejak tembus."),
-    "TEMBUS": st.column_config.TextColumn(help=f"Berapa hari lalu menembus tertinggi {p_masuk} hari"),
+    "TEMBUS": st.column_config.TextColumn(help="Berapa hari lalu menembus tertinggi 20 hari"),
     "LARI SEJAK": st.column_config.NumberColumn(
         format="%.1f%%", help="Kenaikan harga sejak hari tembus. Makin besar, makin buruk entry-mu."),
     "TRANSAKSI/HARI": st.column_config.NumberColumn(
@@ -598,7 +581,7 @@ KONF = {
     "VOL": st.column_config.NumberColumn(format="%.2fx", help="Volume hari ini / rata-rata 20 hari"),
     "1 UNIT": st.column_config.NumberColumn(format="%d lot"),
     "NILAI UNIT": st.column_config.NumberColumn(format="%.0f"),
-    f"SL {stop_n:g}N": st.column_config.NumberColumn(format="%.1f"),
+    "SL 2N": st.column_config.NumberColumn(format="%.1f"),
     "RUGI 1 UNIT": st.column_config.NumberColumn(format="%.0f"),
     "% KAS": st.column_config.NumberColumn(format="%.1f%%"),
 }
@@ -644,13 +627,13 @@ def kartu(sub, kas_bebas):
   </div>
   <div class="kartu-baris">
     Harga <b>{rp(r['harga'])}</b> &middot; N <b>{r['N']:.2f}</b> &middot;
-    tertinggi{p_masuk} <b>{rp(r['tinggi20'])}</b> ({r['jarak']*100:+.2f}%) &middot;
+    tertinggi20 <b>{rp(r['tinggi20'])}</b> ({r['jarak']*100:+.2f}%) &middot;
     vol <b>{r['vol_rasio']:.2f}x</b><br>
     <span class="kartu-unit">1 unit {int(r['unit_lot'])} lot = Rp{rp(r['nilai_unit'])}</span>
     ({r['pct_kas']:.1f}% kas){muat}<br>
-    <span class="kartu-sl">SL {stop_n:g}N {r['sl_2n']:.1f}</span> &middot;
+    <span class="kartu-sl">SL 2N {r['sl_2n']:.1f}</span> &middot;
     rugi 1 unit <b>Rp{rp(r['rugi_unit'])}</b> &middot;
-    keluar{p_keluar} <b>{rp(r['rendah10'])}</b><br>
+    keluar10H <b>{rp(r['rendah10'])}</b><br>
     Transaksi/hari <b>Rp{r.get('turn_med_m', 0):.2f} M</b> &middot;
     free float <b>{f"{r['ff']:.0f}%" if r.get('ff') else '-'}</b> &middot;
     <b>{r.get('bobot', '?')}</b><br>
@@ -697,7 +680,7 @@ else:
         st.markdown(
             f"""<div class="catatan"><b>{n_tinggal} saham berlabel TERTINGGAL.</b>
 Mereka menembus beberapa hari lalu dan harganya sudah lari jauh setelah itu. Sinyalnya masih
-menyala, tapi stop {stop_n:g}N-mu akan diukur dari harga yang sudah naik — risiko rupiahnya sama,
+menyala, tapi stop 2N-mu akan diukur dari harga yang sudah naik — risiko rupiahnya sama,
 entry-nya jauh lebih buruk. Turtle masuk di HARI tembus, bukan belakangan.</div>""",
             unsafe_allow_html=True)
 
